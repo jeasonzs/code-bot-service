@@ -1,0 +1,6 @@
+# Code Bot USB device udev rules
+# Allow non-root users to access the device
+# Reload with: sudo udevadm control --reload && sudo udevadm trigger
+
+# WCH CH32X033F8P6 in Code Bot
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="cb0b", MODE="0666", TAG+="uaccess"
