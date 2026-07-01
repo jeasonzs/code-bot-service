@@ -20,9 +20,7 @@ from .render.theme import VSCodeDark, SCREEN_W, SCREEN_H
 from .render.pages.system import SystemPage
 from .render.pages.quick_actions import QuickActionsPage
 from .render.pages.github import GithubPage
-from .render.pages.claude import ClaudePage
-from .render.pages.openclaw import OpenclawPage
-from .render.pages.hermes import HermesPage
+from .render.pages.placeholders import ClaudePage, OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
 from .render.pages.custom_actions import CustomActionsPage
 from .collectors.system import SystemCollector

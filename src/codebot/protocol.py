@@ -81,16 +81,25 @@ class Frame:
     payload: bytes = b""
 
     def encode(self) -> bytes:
-        """Serialize to bytes (header + payload + CRC)."""
-        # Packed: magic(1) + version(1) + cmd(1) + flags(1) + length(2 LE)
-        hdr = struct.pack(_HEADER_FMT, MAGIC, VERSION, int(self.cmd), 0, len(self.payload))
-        body = hdr + self.payload
-        crc = crc16_ccitt(body)
-        return body + struct.pack("<H", crc)
+        """Serialize to bytes (8B header incl. CRC + payload).
+
+        Wire layout per protocol.md §2:
+            [header 8B: magic ver cmd flags length crc16] [payload N B]
+
+        CRC is computed over the 6-byte header-without-CRC + payload, then
+        stored in the header's crc16 field (offset 6-7, LE).
+        """
+        hdr_no_crc = struct.pack(_HEADER_FMT, MAGIC, VERSION, int(self.cmd), 0, len(self.payload))
+        crc = crc16_ccitt(hdr_no_crc + self.payload)
+        full_hdr = _FULL_HEADER.pack(MAGIC, VERSION, int(self.cmd), 0, len(self.payload), crc)
+        return full_hdr + self.payload
 
     @classmethod
     def try_parse(cls, buf: bytes) -> tuple["Frame | None", int]:
         """Try to parse a frame from a buffer.
+
+        Wire layout (per protocol.md §2):
+            [header 8B: magic ver cmd flags length crc16] [payload N B]
 
         Returns (frame_or_None, bytes_consumed).
         Returns (None, 0) if more data needed.
@@ -103,25 +112,28 @@ class Frame:
         else:
             return None, len(buf)  # no magic, discard all
 
-        if len(buf) < start + HEADER_SIZE - CRC_SIZE:
-            return None, 0  # need at least header (without CRC)
+        if len(buf) < start + HEADER_SIZE:
+            return None, 0  # need at least full 8B header
 
-        # Read header (no CRC)
-        version, cmd, flags, length = struct.unpack_from("<BBBH", buf, start + 1)
+        # Read full header (incl. CRC field at offset 6-7)
+        magic2, version, cmd, flags, length, crc16_field = struct.unpack_from(
+            "<4BHH", buf, start
+        )
+        assert magic2 == MAGIC
         if version != VERSION:
             return None, 1  # bad version, skip the magic byte
         if length > MAX_PAYLOAD:
             return None, 1  # bad length, skip
 
-        # total = header(no CRC) + payload + CRC
-        total = start + (HEADER_SIZE - CRC_SIZE) + length + CRC_SIZE
+        # total = header(8) + payload(length)
+        total = start + HEADER_SIZE + length
         if len(buf) < total:
             return None, 0  # need more data
 
-        # Verify CRC
-        body_end = start + (HEADER_SIZE - CRC_SIZE) + length
-        body = buf[start : body_end]
-        expected_crc = struct.unpack_from("<H", buf, body_end)[0]
+        # CRC is computed over header without CRC field (6B) + payload (N B)
+        body = buf[start : start + (HEADER_SIZE - CRC_SIZE)]
+        body += buf[start + HEADER_SIZE : total]
+        expected_crc = crc16_field
         actual_crc = crc16_ccitt(body)
         if actual_crc != expected_crc:
             return None, 1  # bad CRC, skip the magic byte
@@ -130,8 +142,8 @@ class Frame:
             cmd_enum = Cmd(cmd)
         except ValueError:
             cmd_enum = Cmd(0)  # unknown
-        payload_start = start + (HEADER_SIZE - CRC_SIZE)
-        return cls(cmd=cmd_enum, payload=bytes(buf[payload_start : body_end])), total
+        payload_start = start + HEADER_SIZE
+        return cls(cmd=cmd_enum, payload=bytes(buf[payload_start : total])), total
 
 
 class FrameStream:

@@ -50,8 +50,26 @@ def send(text: str):
 @cli.command()
 def test_protocol():
     """Run protocol codec self-tests."""
-    from .protocol import ProtocolCodec
-    codec = ProtocolCodec()
+    from .protocol import Frame, FrameStream, build_ping, build_set_brightness
+
+    # Round-trip 1: PING (empty payload)
+    f1 = build_ping()
+    parsed = next(FrameStream().feed(f1.encode()))
+    assert parsed.cmd == f1.cmd, f"cmd mismatch: {parsed.cmd} != {f1.cmd}"
+    assert parsed.payload == f1.payload
+
+    # Round-trip 2: SET_BRIGHTNESS (1-byte payload)
+    f2 = build_set_brightness(80)
+    parsed = next(FrameStream().feed(f2.encode()))
+    assert parsed.cmd == f2.cmd
+    assert parsed.payload == f2.payload
+
+    # Round-trip 3: feed with leading garbage (verifies magic-byte resync)
+    stream = FrameStream()
+    parsed = list(stream.feed(b"\xff\x00\x42" + f1.encode() + b"\xaa"))
+    assert len(parsed) == 1, f"expected 1 frame, got {len(parsed)}"
+    assert parsed[0].cmd == f1.cmd
+
     click.echo("Protocol codec self-test: PASS")
 
 
