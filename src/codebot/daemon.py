@@ -198,19 +198,41 @@ class Daemon:
                 draw.text((SCREEN_W - tw - 6, 8), txt, fill=(VSCodeDark.WARNING.r, VSCodeDark.WARNING.g, VSCodeDark.WARNING.b), font=font2)
 
     def _flush_to_device(self) -> None:
-        """Send dirty rects to the device."""
+        """Send dirty rects to the device.
+
+        Each dirty rect is split into ≤MAX_PAYLOAD (512B) sub-frames via
+        build_draw_rects_chunked(), because USB Full Speed EP packets are
+        only 64B and a full-screen frame would otherwise be split across
+        many USB packets by the host controller anyway.
+        """
         rects = self._canvas.find_dirty_rects()
         if not rects:
             return
-        # Build DRAW_RECTS frame (up to 16 rects)
-        rect_data = []
-        for r in rects:
-            rect_data.append((r.x, r.y, r.w, r.h, r.pixels))
+        # Collect sub-frames; may be many for a full-screen flush.
+        rect_data = [(r.x, r.y, r.w, r.h, r.pixels) for r in rects]
         try:
-            frame = build_draw_rects(rect_data)
-            self._usb.send_frame(frame)
+            from .protocol import build_draw_rects_chunked
+            sub_frames = build_draw_rects_chunked(rect_data)
         except Exception as e:
-            log.error("Failed to send draw_rects: %s", e)
+            log.error("Failed to build chunked draw_rects: %s", e)
+            return
+
+        if len(sub_frames) > 1:
+            log.debug("Flushing %d dirty rects as %d sub-frames", len(rects), len(sub_frames))
+
+        n_ok = 0
+        n_err = 0
+        for frame in sub_frames:
+            try:
+                if self._usb.send_frame(frame):
+                    n_ok += 1
+                else:
+                    n_err += 1
+            except Exception as e:
+                n_err += 1
+                log.error("Failed to send sub-frame: %s", e)
+        if n_err:
+            log.warning("Draw flush: %d ok, %d failed", n_ok, n_err)
 
     def _poll_usb(self) -> None:
         """Poll device for incoming touch events."""

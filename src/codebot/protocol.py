@@ -192,16 +192,77 @@ def build_draw_rects(rects: list[tuple[int, int, int, int, bytes]]) -> Frame:
 
     rects: list of (x, y, w, h, pixels_rgb565_big_endian)
     pixels must be w*h*2 bytes.
+
+    Caller is responsible for keeping total payload ≤ MAX_PAYLOAD=512B.
+    For dirty regions larger than that, use build_draw_rects_chunked().
+
+    Note: count is uint16_t (2B LE), not uint8_t, so pixel data starts at
+    an even-aligned offset inside the payload. This avoids misaligned
+    halfword loads on RISC-V targets like CH32X035.
     """
     if not 0 < len(rects) <= 16:
         raise ValueError(f"rect count must be 1-16, got {len(rects)}")
-    body = struct.pack("<B", len(rects))
+    body = struct.pack("<H", len(rects))     # 2-byte count
     for x, y, w, h, pixels in rects:
         body += struct.pack("<HHHH", x, y, w, h)
         body += pixels
     if len(body) > MAX_PAYLOAD:
         raise ValueError(f"frame too large: {len(body)} > {MAX_PAYLOAD}")
     return Frame(cmd=Cmd.DRAW_RECTS, payload=body)
+
+
+# Single-rect payload overhead: 2 (count) + 4*2 (x,y,w,h) = 10 bytes.
+# Pixel data starts at offset 10 (even-aligned). Remaining bytes are pixels:
+# 2 bytes per pixel RGB565. Max pixels per chunk = (512 - 10) // 2 = 251.
+_RECT_HEADER_BYTES = 2 + 4 * 2
+_MAX_PIXELS_PER_RECT = (MAX_PAYLOAD - _RECT_HEADER_BYTES) // 2  # 251
+
+
+def chunk_rect(x: int, y: int, w: int, h: int, pixels: bytes) -> list[Frame]:
+    """Split a single (x, y, w, h, pixels) rect into ≤MAX_PAYLOAD DRAW_RECTS frames.
+
+    Strategy: 1-row strips of width ≤251 pixels (each frame = header + at most
+    503B pixels = 512B total). For full-screen 320×172: 2 cols × 172 rows = 344 frames.
+    """
+    if len(pixels) != w * h * 2:
+        raise ValueError(f"pixels length {len(pixels)} != w*h*2 = {w*h*2}")
+    if w == 0 or h == 0:
+        return []
+    if w * h <= _MAX_PIXELS_PER_RECT:
+        # Whole rect fits in one frame
+        frame = build_draw_rects([(x, y, w, h, pixels)])
+        return [frame]
+
+    # Split into columns of width ≤ _MAX_PIXELS_PER_RECT, 1 row each
+    frames: list[Frame] = []
+    cols = (w + _MAX_PIXELS_PER_RECT - 1) // _MAX_PIXELS_PER_RECT
+    col_w = w // cols
+    remainder = w - col_w * cols  # leftover pixels go to last column
+    for row in range(h):
+        row_off = row * w * 2
+        for c in range(cols):
+            cx = x + c * col_w
+            cw = col_w + (1 if c == cols - 1 and remainder > 0 else 0)
+            # Re-pack LE: each row's pixels are tightly packed; extract slice
+            sub = bytearray(cw * 2)
+            src_x = c * col_w
+            for px in range(cw):
+                src = row_off + (src_x + px) * 2
+                sub[px * 2]     = pixels[src]
+                sub[px * 2 + 1] = pixels[src + 1]
+            frames.append(build_draw_rects([(cx, y + row, cw, 1, bytes(sub))]))
+    return frames
+
+
+def build_draw_rects_chunked(rects: list[tuple[int, int, int, int, bytes]]) -> list[Frame]:
+    """Split each (potentially large) rect into multiple ≤MAX_PAYLOAD DRAW_RECTS frames.
+
+    Returns a flat list of frames; caller sends them all sequentially.
+    """
+    out: list[Frame] = []
+    for x, y, w, h, pixels in rects:
+        out.extend(chunk_rect(x, y, w, h, pixels))
+    return out
 
 
 def build_hid_keystrokes(reports: list[bytes], delay_ms: int = 50) -> Frame:

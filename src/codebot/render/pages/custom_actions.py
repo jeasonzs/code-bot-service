@@ -27,7 +27,7 @@ class CustomActionsPage(BasePage):
     title = "Custom Actions"
     ITEMS_PER_PAGE = 6
 
-    def __init__(self, actions: list[Action]) -> None:
+    def __init__(self, actions: Optional[list[Action]] = None) -> None:
         self.actions = actions or [
             Action("git status", "≡", "command", {"command": "git status"}),
             Action("git log",    "⊜", "command", {"command": "git log --oneline -5"}),

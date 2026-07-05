@@ -72,22 +72,21 @@ class Canvas:
             self.paste_rect(fg, x, y, fill_w, h)
 
     def to_rgb565_bytes(self, x: int = 0, y: int = 0, w: Optional[int] = None, h: Optional[int] = None) -> bytes:
-        """Convert a region of the image to RGB565 big-endian bytes."""
+        """Convert a region of the image to RGB565 big-endian bytes (pure Python)."""
         if w is None: w = SCREEN_W
         if h is None: h = SCREEN_H
-        region = self.image.crop((x, y, x + w, y + h))
-        # Pillow RGB888 -> RGB565
-        # 320x172x2 = 110 KB
-        r5 = (region.tobytes("raw", "R")[::3] >> 3).astype("uint8")
-        g6 = (region.tobytes("raw", "G")[::3] >> 2).astype("uint8")
-        b5 = (region.tobytes("raw", "B")[::3] >> 3).astype("uint8")
-        # Pack: RRRRRGGGGGGBBBBB -> big-endian
-        import numpy as np
-        r5 = np.frombuffer(region.tobytes("raw", "R"), dtype=np.uint8)[::3] >> 3
-        g6 = np.frombuffer(region.tobytes("raw", "G"), dtype=np.uint8)[::3] >> 2
-        b5 = np.frombuffer(region.tobytes("raw", "B"), dtype=np.uint8)[::3] >> 3
-        rgb565 = (r5.astype(np.uint16) << 11) | (g6.astype(np.uint16) << 5) | b5.astype(np.uint16)
-        return rgb565.astype(">u2").tobytes()  # big-endian uint16
+        region = self.image.crop((x, y, x + w, y + h)).tobytes("raw", "RGB")
+        n = len(region) // 3
+        # RGB888 -> RGB565 (big-endian) — pack 2 bytes per pixel
+        out = bytearray(n * 2)
+        for i in range(n):
+            r = region[i * 3]
+            g = region[i * 3 + 1]
+            b = region[i * 3 + 2]
+            v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            out[i * 2]     = (v >> 8) & 0xFF
+            out[i * 2 + 1] = v & 0xFF
+        return bytes(out)
 
     def find_dirty_rects(self, max_rects: int = 16) -> list[DirtyRect]:
         """Find dirty rects by diffing with previous frame.
