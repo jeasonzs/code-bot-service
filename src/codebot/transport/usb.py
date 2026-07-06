@@ -231,13 +231,11 @@ class UsbTransport:
             return 0
         written = 0
         with self._tx_lock:
-            for off in range(0, len(data), chunk_size):
-                chunk = data[off:off + chunk_size]
-                try:
-                    self._ep_data.write(chunk, timeout=1000)
-                    written += len(chunk)
-                except usb.core.USBError:
-                    return written
+            try:
+                self._ep_data.write(data, timeout=1000)
+                written += len(data)
+            except usb.core.USBError:
+                return written
         return written
 
     # ----- Send HID Keyboard (EP3 IN - device → host) -----

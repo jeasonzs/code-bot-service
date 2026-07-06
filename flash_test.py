@@ -127,8 +127,10 @@ def main() -> int:
         stripe_h = SCREEN_H // 4
         for i, color in enumerate([RED, GREEN, BLUE, YELLOW]):
             y = i * stripe_h
-            ok = send_full_rect(t, 32, y, 64, stripe_h, color,
-                                f"  stripe {i+1}")
+            # ok = send_full_rect(t, 0, y, 320, stripe_h, color,
+            #                     f"  stripe {i+1}")
+            ok = send_full_rect(t, 0, 0, SCREEN_W, SCREEN_H, color,
+                    f"  stripe {i+1}")
             print(f"  -> ok={ok}")
             time.sleep(0.3)
 
