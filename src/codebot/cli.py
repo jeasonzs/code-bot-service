@@ -49,28 +49,42 @@ def send(text: str):
 
 @cli.command()
 def test_protocol():
-    """Run protocol codec self-tests."""
-    from .protocol import Frame, FrameStream, build_ping, build_set_brightness
+    """Run protocol codec self-tests (v3: 1B cmd + struct, no magic/CRC)."""
+    from .protocol import Frame, build_ping, build_set_brightness, build_clear, build_draw_rect_begin
 
-    # Round-trip 1: PING (empty payload)
+    # Round-trip 1: PING (empty payload, 1B)
     f1 = build_ping()
-    parsed = next(FrameStream().feed(f1.encode()))
+    assert len(f1.encode()) == 1
+    parsed = Frame.decode(f1.encode())
     assert parsed.cmd == f1.cmd, f"cmd mismatch: {parsed.cmd} != {f1.cmd}"
     assert parsed.payload == f1.payload
 
-    # Round-trip 2: SET_BRIGHTNESS (1-byte payload)
+    # Round-trip 2: SET_BRIGHTNESS (1B payload, 2B total)
     f2 = build_set_brightness(80)
-    parsed = next(FrameStream().feed(f2.encode()))
+    assert len(f2.encode()) == 2
+    parsed = Frame.decode(f2.encode())
     assert parsed.cmd == f2.cmd
     assert parsed.payload == f2.payload
 
-    # Round-trip 3: feed with leading garbage (verifies magic-byte resync)
-    stream = FrameStream()
-    parsed = list(stream.feed(b"\xff\x00\x42" + f1.encode() + b"\xaa"))
-    assert len(parsed) == 1, f"expected 1 frame, got {len(parsed)}"
-    assert parsed[0].cmd == f1.cmd
+    # Round-trip 3: CLEAR (2B payload, 3B total)
+    f3 = build_clear(0xF800)
+    assert len(f3.encode()) == 3
+    parsed = Frame.decode(f3.encode())
+    assert parsed.cmd == f3.cmd
+    assert parsed.payload == f3.payload
 
-    click.echo("Protocol codec self-test: PASS")
+    # Round-trip 4: DRAW_RECT_BEGIN (8B payload, 9B total)
+    f4 = build_draw_rect_begin(0, 0, 320, 172)
+    assert len(f4.encode()) == 9
+    parsed = Frame.decode(f4.encode())
+    assert parsed.cmd == f4.cmd
+    assert parsed.payload == f4.payload
+
+    # All frames fit in single USB packet (≤ 64B)
+    for f in (f1, f2, f3, f4):
+        assert len(f.encode()) <= 64, f"frame too large: {len(f.encode())}"
+
+    click.echo("Protocol codec self-test (v3): PASS")
 
 
 def main():

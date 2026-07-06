@@ -1,14 +1,14 @@
 """USB transport layer - pyusb-based communication with the device.
 
-Handles:
-- USB device discovery (vendor 0x1A86, product 0xCB0B)
-- Vendor bulk OUT (EP1 OUT, 0x01) - send commands to device
-- Vendor bulk IN  (EP2 IN,  0x82) - receive touch events / PONG / LOG from device
-- HID Keyboard IN (EP3 IN,  0x83) - send keystroke reports to host
+v3 重构: 控制 / 数据物理隔离到两个 OUT 端点.
+- EP1 OUT (0x01) bulk: 控制通道 (Frame: 1B cmd + struct)
+- EP2 IN  (0x82) bulk: Vendor 响应 (Frame: 1B cmd + struct)
+- EP3 IN  (0x83) interrupt: HID Keyboard (标准 USB HID, host 端不需要管)
+- EP5 OUT (0x05) bulk: 图像数据流 (raw RGB565, 0 协议)
 
 Device exposes exactly two interfaces:
-  Interface 0: Vendor Specific (0xFF) — bulk OUT + bulk IN
-  Interface 1: HID Keyboard (0x03/0x01/0x01) — interrupt IN
+  Interface 0: Vendor Specific (0xFF) — EP1 OUT + EP2 IN + EP5 OUT
+  Interface 1: HID Keyboard (0x03/0x01/0x01) — EP3 IN (设备 → host)
 
 There is NO CDC ACM interface. Debug logging on the device side goes to
 USART3 (PC18/PC19) on the MCU, not over USB. Host-side debug info comes
@@ -23,18 +23,12 @@ from typing import Optional
 
 import usb.core
 import usb.util
-import usb.backend
 
-from ..protocol import (
-    Frame,
-    FrameStream,
-    TouchReport,
-    Cmd,
-)
+from ..protocol import Cmd, Frame, TouchReport
 
 
 # Code Bot interfaces exposed by the firmware
-VENDOR_INTERFACE = 0   # Vendor bulk IN/OUT
+VENDOR_INTERFACE = 0   # Vendor bulk IN/OUT + EP5 data OUT
 HID_INTERFACE    = 1   # HID Keyboard interrupt IN
 
 # WCH USB VID + our PID
@@ -43,12 +37,7 @@ DEVICE_PID = 0xCB0B
 
 
 def _safe_get_string(dev, index: int) -> Optional[str]:
-    """Best-effort USB string descriptor fetch.
-
-    Some firmwares advertise iManufacturer/iProduct/iSerial without a valid
-    langid, which makes pyusb's get_string() raise. We swallow that here so
-    discovery still succeeds and returns the partial info we have.
-    """
+    """Best-effort USB string descriptor fetch."""
     if not index:
         return None
     try:
@@ -57,7 +46,7 @@ def _safe_get_string(dev, index: int) -> Optional[str]:
         return None
 
 
-def _build_device_info(dev) -> DeviceInfo:
+def _build_device_info(dev) -> "DeviceInfo":
     return DeviceInfo(
         vendor_id=dev.idVendor,
         product_id=dev.idProduct,
@@ -83,7 +72,7 @@ class DeviceInfo:
 
 
 class UsbTransport:
-    """Thread-safe USB transport for Code Bot device."""
+    """Thread-safe USB transport for Code Bot device (v3 protocol)."""
 
     def __init__(self, vid: int = DEVICE_VID, pid: int = DEVICE_PID, backend=None) -> None:
         self.vid = vid
@@ -91,13 +80,13 @@ class UsbTransport:
         self._backend = backend
 
         self._dev: Optional[usb.core.Device] = None
-        self._ep_out = None  # 0x01 OUT: Vendor bulk OUT  (H→D commands)
-        self._ep_in = None   # 0x82 IN:  Vendor bulk IN   (D→H frames)
+        self._ep_out = None  # 0x01 OUT: Vendor bulk OUT  (H→D control commands)
+        self._ep_in = None   # 0x82 IN:  Vendor bulk IN   (D→H response frames)
+        self._ep_data = None # 0x05 OUT: Vendor bulk OUT  (H→D image data stream)
         self._ep_hid = None  # 0x83 IN:  HID Keyboard IN   (D→H keystrokes)
 
         self._rx_lock = threading.Lock()
         self._tx_lock = threading.Lock()
-        self._stream = FrameStream()
         self._last_touch: Optional[TouchReport] = None
 
     # ----- Discovery -----
@@ -126,10 +115,7 @@ class UsbTransport:
 
     # ----- Open/close -----
     def open(self) -> bool:
-        """Open device, claim interfaces 0 (Vendor) and 1 (HID), wire up endpoints.
-
-        Returns True on success.
-        """
+        """Open device, claim interfaces 0 (Vendor) and 1 (HID), wire up endpoints."""
         self._dev = usb.core.find(
             idVendor=self.vid,
             idProduct=self.pid,
@@ -144,7 +130,7 @@ class UsbTransport:
                 if self._dev.is_kernel_driver_active(iface):
                     self._dev.detach_kernel_driver(iface)
             except (NotImplementedError, usb.core.USBError):
-                pass  # non-Linux / not supported
+                pass
 
         # Set configuration (idempotent)
         try:
@@ -157,7 +143,6 @@ class UsbTransport:
             try:
                 usb.util.claim_interface(self._dev, iface)
             except usb.core.USBError:
-                # one last try: detach + claim again
                 try:
                     if self._dev.is_kernel_driver_active(iface):
                         self._dev.detach_kernel_driver(iface)
@@ -165,13 +150,16 @@ class UsbTransport:
                 except (NotImplementedError, usb.core.USBError):
                     pass
 
-        # Wire up endpoints
+        # Wire up endpoints by address
         cfg = self._dev.get_active_configuration()
         for ep in cfg[(VENDOR_INTERFACE, 0)]:
-            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT:
+            addr = ep.bEndpointAddress
+            if addr == 0x01:
                 self._ep_out = ep
-            elif usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
+            elif addr == 0x82:
                 self._ep_in = ep
+            elif addr == 0x05:
+                self._ep_data = ep
         for ep in cfg[(HID_INTERFACE, 0)]:
             if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
                 self._ep_hid = ep
@@ -192,30 +180,26 @@ class UsbTransport:
             self._dev = None
             self._ep_out = None
             self._ep_in = None
+            self._ep_data = None
             self._ep_hid = None
 
     @property
     def is_open(self) -> bool:
         return self._dev is not None and self._ep_out is not None
 
-    # ----- Send (Vendor bulk OUT EP1) -----
+    # ----- Send control frame (EP1 OUT) -----
     def send_frame(self, frame: Frame, timeout: int = 1000) -> bool:
-        """Send a frame to the device via Vendor bulk OUT.
-
-        On USBError, attempt to clear any endpoint halt and retry once — the
-        WCH CH32X033 USBFS firmware occasionally leaves EP1 OUT NAK'd after a
-        packet and needs a CLEAR_FEATURE to re-arm.
-        """
+        """Send a control frame to the device via EP1 OUT (cmd + struct)."""
         if not self.is_open:
             return False
         data = frame.encode()
+        if len(data) > 64:
+            raise ValueError(f"frame too large for v3 single-packet protocol: {len(data)} > 64")
         with self._tx_lock:
             try:
                 self._ep_out.write(data, timeout=timeout)
                 return True
             except usb.core.USBError as e:
-                # Endpoint likely stalled (NAK forever after first packet).
-                # Clear the halt and retry once.
                 if e.errno in (None, 5, 19, 32) or "Pipe" in str(e) or "timed out" in str(e).lower():
                     try:
                         self._ep_out.clear_halt()
@@ -229,11 +213,41 @@ class UsbTransport:
                 return False
 
     def send_ping(self) -> bool:
-        return self.send_frame(Frame(cmd=Cmd.PING))
+        return self.send_frame(Frame.ping())
 
-    # ----- Send HID Keyboard (EP3 IN) -----
+    # ----- Send image data (EP5 OUT) -----
+    def write_pixels(self, data: bytes, chunk_size: int = 64) -> int:
+        """Write raw RGB565 BE pixel data to EP5 OUT, split into 64B chunks.
+
+        Byte order: each pixel is 2 bytes [high, low] (big-endian),
+        matching what the GC9307 SPI expects. The MCU does NOT byte-swap;
+        whatever bytes you pass in this function are sent straight to the
+        LCD's SPI. canvas.to_rgb565_bytes() already produces this format.
+
+        Returns number of bytes written. Caller must have already sent
+        DRAW_RECT_BEGIN on EP1 OUT; the device NAKs EP5 OUT until BEGIN.
+        """
+        if not self.is_open or self._ep_data is None:
+            return 0
+        written = 0
+        with self._tx_lock:
+            for off in range(0, len(data), chunk_size):
+                chunk = data[off:off + chunk_size]
+                try:
+                    self._ep_data.write(chunk, timeout=1000)
+                    written += len(chunk)
+                except usb.core.USBError:
+                    return written
+        return written
+
+    # ----- Send HID Keyboard (EP3 IN - device → host) -----
     def send_hid_report(self, report: bytes, timeout: int = 100) -> bool:
-        """Send an 8-byte HID Keyboard report."""
+        """Send an 8-byte HID Keyboard report.
+
+        Note: In v3, the device generates HID reports autonomously (e.g., from
+        touch events). The host does NOT need to send keystroke commands. This
+        method is kept for backward compatibility / debugging.
+        """
         if not self.is_open or self._ep_hid is None:
             return False
         if len(report) != 8:
@@ -245,11 +259,12 @@ class UsbTransport:
             except usb.core.USBError:
                 return False
 
-    # ----- Receive (Vendor bulk IN EP2) -----
+    # ----- Receive (EP2 IN) -----
     def poll(self, timeout_ms: int = 10) -> list[Frame]:
-        """Poll for incoming frames, return parsed ones.
+        """Poll for incoming frames on EP2 IN.
 
-        Non-blocking if timeout_ms small.
+        v3: each USB packet is exactly one frame (no stream parsing needed).
+        Returns list of decoded frames (may be empty on timeout).
         """
         if not self.is_open:
             return []
@@ -264,13 +279,15 @@ class UsbTransport:
             return []
 
         with self._rx_lock:
-            frames = list(self._stream.feed(bytes(data)))
-            # Track last touch event
+            frame = Frame.decode(bytes(data))
+            if frame is None:
+                return []
+            frames = [frame]
             for f in frames:
                 if f.cmd == Cmd.TOUCH_EVENT:
                     try:
-                        self._last_touch = TouchReport.from_payload(f.payload)
-                    except ValueError:
+                        self._last_touch = f.decode_touch()
+                    except (ValueError, struct.error):
                         pass
         return frames
 

@@ -13,7 +13,11 @@ import threading
 from typing import Optional
 
 from .transport.usb import UsbTransport
-from .protocol import Frame, TouchEvent, build_clear, build_set_brightness, build_draw_rects
+from .protocol import (
+    Frame, TouchEvent, Cmd,
+    build_clear, build_set_brightness,
+    build_draw_rect_begin, build_draw_rect_end, build_draw_rect_abort,
+)
 from .render.canvas import Canvas
 from .render.widgets import draw_indicator, draw_title
 from .render.theme import VSCodeDark, SCREEN_W, SCREEN_H
@@ -136,19 +140,22 @@ class Daemon:
             return
         action = self._actions_page.actions[idx]
         log.info("Executing custom action %d: %s (%s)", idx, action.name, action.action_type)
+        # 注: v3 不再用 CMD_HID_KEYSTROKES 自定义命令. 设备检测触摸后自己构造
+        # 标准 HID Keyboard report 发到 host (走 EP3 IN). host 端不需要任何 service.
+        if action.action_type == "hid_keystrokes":
+            log.warning(
+                "Action '%s' is type 'hid_keystrokes' (deprecated in v3). "
+                "The device now generates HID reports autonomously from touch; "
+                "this action no longer sends any host-side keystroke.",
+                action.name,
+            )
+            return
         executor = get_executor(action.action_type)
         if executor is None:
             log.error("Unknown action type: %s", action.action_type)
             return
-        if action.action_type == "hid_keystrokes":
-            # Use protocol to send HID reports
-            from .protocol import build_hid_keystrokes, string_to_hid_reports
-            reports = string_to_hid_reports(action.config.get("text", ""))
-            frame = build_hid_keystrokes(reports)
-            self._usb.send_frame(frame)
-        else:
-            result = executor.execute(action.config)
-            log.info("Action result: %s", result)
+        result = executor.execute(action.config)
+        log.info("Action result: %s", result)
 
     def _execute_quick_action(self, idx: int) -> None:
         if not isinstance(self._pages[1], QuickActionsPage):
@@ -198,39 +205,43 @@ class Daemon:
                 draw.text((SCREEN_W - tw - 6, 8), txt, fill=(VSCodeDark.WARNING.r, VSCodeDark.WARNING.g, VSCodeDark.WARNING.b), font=font2)
 
     def _flush_to_device(self) -> None:
-        """Send dirty rects to the device.
+        """Send dirty rects to the device via v3 protocol (BEGIN + EP5 stream).
 
-        Each dirty rect is split into ≤MAX_PAYLOAD (512B) sub-frames via
-        build_draw_rects_chunked(), because USB Full Speed EP packets are
-        only 64B and a full-screen frame would otherwise be split across
-        many USB packets by the host controller anyway.
+        v3 flow per rect:
+          1. EP1 OUT: DRAW_RECT_BEGIN {x,y,w,h}  (9B)
+          2. EP5 OUT: raw pixel data (64B/包, 任意包数)
+          3. (设备自动 CS_HIGH, 字节数到齐即结束)
         """
         rects = self._canvas.find_dirty_rects()
         if not rects:
             return
-        # Collect sub-frames; may be many for a full-screen flush.
-        rect_data = [(r.x, r.y, r.w, r.h, r.pixels) for r in rects]
-        try:
-            from .protocol import build_draw_rects_chunked
-            sub_frames = build_draw_rects_chunked(rect_data)
-        except Exception as e:
-            log.error("Failed to build chunked draw_rects: %s", e)
-            return
-
-        if len(sub_frames) > 1:
-            log.debug("Flushing %d dirty rects as %d sub-frames", len(rects), len(sub_frames))
 
         n_ok = 0
         n_err = 0
-        for frame in sub_frames:
-            try:
-                if self._usb.send_frame(frame):
-                    n_ok += 1
-                else:
-                    n_err += 1
-            except Exception as e:
+        for r in rects:
+            # 1. 发 BEGIN (开窗 + 打开 EP5 OUT 数据通道)
+            if not self._usb.send_frame(
+                build_draw_rect_begin(r.x, r.y, r.w, r.h),
+                timeout=500,
+            ):
                 n_err += 1
-                log.error("Failed to send sub-frame: %s", e)
+                self._usb.send_frame(build_draw_rect_abort(), timeout=200)
+                continue
+
+            # 2. EP5 OUT 推像素流
+            written = self._usb.write_pixels(r.pixels)
+            expected = r.w * r.h * 2
+            if written != expected:
+                log.warning(
+                    "Rect (%d,%d,%d,%d) wrote %d/%d bytes",
+                    r.x, r.y, r.w, r.h, written, expected,
+                )
+                n_err += 1
+                self._usb.send_frame(build_draw_rect_abort(), timeout=200)
+                continue
+
+            n_ok += 1
+
         if n_err:
             log.warning("Draw flush: %d ok, %d failed", n_ok, n_err)
 
@@ -238,16 +249,15 @@ class Daemon:
         """Poll device for incoming touch events."""
         frames = self._usb.poll(timeout_ms=10)
         for f in frames:
-            if f.cmd.name == "TOUCH_EVENT":
-                # Parse payload
-                if len(f.payload) >= 5:
-                    event_type = f.payload[0]
-                    x = f.payload[1] | (f.payload[2] << 8)
-                    y = f.payload[3] | (f.payload[4] << 8)
-                    self._handle_touch(event_type, x, y)
-            elif f.cmd.name == "PONG":
+            if f.cmd == Cmd.TOUCH_EVENT:
+                try:
+                    rep = f.decode_touch()
+                    self._handle_touch(int(rep.event_type), rep.x, rep.y)
+                except (ValueError, struct.error) as e:
+                    log.warning("Bad TOUCH_EVENT frame: %s", e)
+            elif f.cmd == Cmd.PONG:
                 log.debug("PONG from device")
-            elif f.cmd.name == "LOG":
+            elif f.cmd == Cmd.LOG:
                 log.info("[firmware] %s", f.payload.decode("utf-8", errors="replace"))
 
     def _render_loop(self) -> None:
