@@ -1,21 +1,23 @@
 """Standalone LCD刷屏 test - verify device actually renders what we send.
 
+v0.18 协议: 走 BEGIN + EP5 write_pixels + END 三段式.
+
 Sequence:
   1. CLEAR black/white/red/green/blue (basic pixel-write sanity)
   2. 4 horizontal color stripes (R/G/B/Y) — verify orientation, no rotation
   3. Per-row color sweep (172 rows × rainbow gradient) — verify row-by-row streaming
   4. 8x8 checker pattern — verify sub-rect positioning accuracy
   5. CLEAR white (final)
-
-Requires the new firmware (streaming parser fix). Each full-screen push goes
-through build_draw_rects_chunked (~344 sub-frames).
 """
 
 import sys
 import time
 
 from codebot.transport.usb import UsbTransport
-from codebot.protocol import Frame, Cmd, build_clear, build_draw_rects_chunked
+from codebot.protocol import (
+    build_clear,
+    build_draw_rect_begin, build_draw_rect_end,
+)
 from codebot.render.theme import SCREEN_W, SCREEN_H
 
 
@@ -49,7 +51,7 @@ def rgb565_sweep_row(y: int, h: int) -> int:
     elif h_seg == 1:
         r, g, b = (59 - f) * 255 // 60, 255, 0
     elif h_seg == 2:
-        r, g, b = 0, 255, f * 255 // 60
+        r, g, b = 0, 255, f * 255 // 60, 0
     elif h_seg == 3:
         r, g, b = 0, (59 - f) * 255 // 60, 255
     elif h_seg == 4:
@@ -62,32 +64,35 @@ def rgb565_sweep_row(y: int, h: int) -> int:
 
 def send_full_rect(t: UsbTransport, x: int, y: int, w: int, h: int, color: int,
                    label: str = "") -> bool:
-    """Push a single-rect update using chunked DRAW_RECTS."""
-    import time
+    """Push a single-rect update via v3 protocol:
+       EP1 OUT: DRAW_RECT_BEGIN {x,y,w,h} (9B)
+       EP5 OUT: raw pixel stream (RGB565 BE bytes, 64B chunks)
+       EP1 OUT: DRAW_RECT_END (1B, polite close)
+    """
     pixels = rgb565_pixel_bytes(color, w * h)
-    sub_frames = build_draw_rects_chunked([(x, y, w, h, pixels)])
-    if label:
-        print(f"  {label}: rect=({x},{y},{w},{h}) color=0x{color:04X} -> {len(sub_frames)} sub-frames")
-    n_ok = 0
-    first_fail = -1
+    expected = len(pixels)
     t0 = time.monotonic()
-    for i, f in enumerate(sub_frames):
-        try:
-            if t.send_frame(f):
-                n_ok += 1
-            else:
-                if first_fail < 0:
-                    first_fail = i
-                    print(f"    send_frame[{i}] returned False")
-        except Exception as e:
-            if first_fail < 0:
-                first_fail = i
-                print(f"    send_frame[{i}] raised: {type(e).__name__}: {e}")
-            break
+
+    # 1. 发 BEGIN
+    if not t.send_frame(build_draw_rect_begin(x, y, w, h)):
+        print(f"  {label}: send_frame(BEGIN) returned False")
+        return False
+
+    # 2. 推像素流到 EP5
+    written = t.write_pixels(pixels)
+    if written != expected:
+        print(f"  {label}: write_pixels wrote {written}/{expected} bytes")
+        t.send_frame(build_draw_rect_end())
+        return False
+
+    # 3. 发 END (礼貌, 字节数已到其实会自动关)
+    if not t.send_frame(build_draw_rect_end()):
+        print(f"  {label}: send_frame(END) returned False")
+        return False
+
     elapsed_ms = (time.monotonic() - t0) * 1000.0
-    per_frame_ms = elapsed_ms / len(sub_frames) if sub_frames else 0.0
-    print(f"    -> {n_ok}/{len(sub_frames)} sub-frames OK  elapsed={elapsed_ms:.1f}ms  per-frame={per_frame_ms:.2f}ms" + (f", first fail @ {first_fail}" if first_fail >= 0 else ""))
-    return n_ok == len(sub_frames)
+    print(f"  {label}: rect=({x},{y},{w},{h}) color=0x{color:04X} -> {elapsed_ms:.1f}ms ({expected}B)")
+    return True
 
 
 def main() -> int:
@@ -120,7 +125,6 @@ def main() -> int:
         # 4 horizontal stripes (top→bottom: RED / GREEN / BLUE / YELLOW)
         print("step: 4 horizontal stripes")
         stripe_h = SCREEN_H // 4
-        # for i, color in enumerate([RED, GREEN, BLUE, YELLOW]):
         for i, color in enumerate([RED, GREEN, BLUE, YELLOW]):
             y = i * stripe_h
             ok = send_full_rect(t, 32, y, 64, stripe_h, color,
