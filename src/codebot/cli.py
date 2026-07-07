@@ -17,9 +17,12 @@ def cli():
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize)")
 @click.option("--config", "-c", type=click.Path(), default=None, help="Config file path")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-def start(foreground: bool, config: str | None, verbose: bool):
+@click.option("--sim", is_flag=True, help="Simulation mode: no USB device, render to browser")
+@click.option("--sim-port", type=int, default=8080, help="HTTP port for sim mode (default 8080)")
+def start(foreground: bool, config: str | None, verbose: bool, sim: bool, sim_port: int):
     """Start the codebotd daemon."""
-    run_daemon(foreground=foreground, config_path=config, verbose=verbose)
+    run_daemon(foreground=foreground, config_path=config, verbose=verbose,
+               sim=sim, sim_port=sim_port)
 
 
 @cli.command()

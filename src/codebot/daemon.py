@@ -1,10 +1,11 @@
 """Code Bot daemon main loop.
 
-Orchestrates: USB transport, page renderers, system metrics, touch handling.
+Orchestrates: USB transport (or sim), page renderers, system metrics, touch handling.
 """
 
 from __future__ import annotations
 
+import queue
 import signal
 import sys
 import time
@@ -54,12 +55,13 @@ def make_pages() -> list:
 # Main daemon
 # ==============================================================
 class Daemon:
-    """Main daemon that owns the USB transport and render loop."""
+    """Main daemon that owns the USB transport (or sim server) and render loop."""
 
-    def __init__(self, config_path: Optional[str] = None, verbose: bool = False) -> None:
+    def __init__(self, config_path: Optional[str] = None, verbose: bool = False,
+                 sim: bool = False, sim_port: int = 8080) -> None:
         self.verbose = verbose
+        self.sim = sim
         self._stop = threading.Event()
-        self._usb = UsbTransport()
         self._canvas = Canvas()
         self._pages = make_pages()
         self._current_page = 0
@@ -70,6 +72,19 @@ class Daemon:
             if isinstance(p, CustomActionsPage):
                 self._actions_page = p
                 break
+
+        # Touch event queue: HTTP thread (sim) 或 USB poll 都把事件 push 进来,
+        # 主循环统一 drain → _handle_touch, 避免 _handle_touch 跨线程调用
+        self._touch_queue: queue.Queue = queue.Queue()
+
+        if self.sim:
+            from .sim import SimServer  # avoid hard dep when USB-only
+            self._sim = SimServer(port=sim_port, width=SCREEN_W, height=SCREEN_H)
+            self._sim.set_touch_callback(self._enqueue_touch_from_sim)
+            self._usb = None
+        else:
+            self._usb = UsbTransport()
+            self._sim = None
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self.verbose else logging.INFO
@@ -169,6 +184,19 @@ class Daemon:
         result = executor.execute({"command": action.command})
         log.info("Quick action result: %s", result)
 
+    def _enqueue_touch_from_sim(self, event_type: int, x: int, y: int) -> None:
+        """Called from HTTP thread by SimServer. Push to queue; main loop drains."""
+        self._touch_queue.put((event_type, x, y))
+
+    def _drain_touch_queue(self) -> None:
+        """Drain queued touch events into the existing _handle_touch (main thread only)."""
+        while True:
+            try:
+                event_type, x, y = self._touch_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._handle_touch(event_type, x, y)
+
     def _render_current(self) -> None:
         """Render the current page to the canvas."""
         page = self._pages[self._current_page]
@@ -261,10 +289,14 @@ class Daemon:
                 log.info("[firmware] %s", f.payload.decode("utf-8", errors="replace"))
 
     def _render_loop(self) -> None:
-        """Main render loop: render, draw chrome, flush to device."""
+        """Main render loop: render, draw chrome, push to device or sim."""
         self._render_current()
         self._draw_chrome()
-        self._flush_to_device()
+        if self.sim:
+            # sim: 直接 publish full frame (Pillow Image), SimServer 处理锁
+            self._sim.update_image(self._canvas.image)
+        else:
+            self._flush_to_device()
 
     def _stop_handler(self, signum, frame) -> None:
         log.info("Signal %d received, stopping...", signum)
@@ -273,17 +305,25 @@ class Daemon:
     def run(self) -> None:
         """Run the daemon (blocks until stopped)."""
         self._setup_logging()
-        signal.signal(signal.SIGINT, self._stop_handler)
-        signal.signal(signal.SIGTERM, self._stop_handler)
+        # signal.signal 只在主线程有效; 测试/嵌入场景下被调用者手动管 stop event
+        try:
+            signal.signal(signal.SIGINT, self._stop_handler)
+            signal.signal(signal.SIGTERM, self._stop_handler)
+        except ValueError:
+            pass
 
-        if not self._find_and_open():
-            log.error("Could not find/open Code Bot device")
-            return
-
-        # Send initial brightness + clear
-        self._usb.send_frame(build_set_brightness(80))
-        time.sleep(0.1)
-        self._usb.send_frame(build_clear(0x0000))
+        if self.sim:
+            log.info("Starting in SIMULATION mode (no USB device required)")
+            self._sim.start()
+            log.info("Open http://127.0.0.1:%d in a browser to view", self._sim.port)
+        else:
+            if not self._find_and_open():
+                log.error("Could not find/open Code Bot device")
+                return
+            # Send initial brightness + clear
+            self._usb.send_frame(build_set_brightness(80))
+            time.sleep(0.1)
+            self._usb.send_frame(build_clear(0x0000))
 
         # Start collectors
         self._sys_collector.start()
@@ -293,14 +333,17 @@ class Daemon:
 
         last_render = 0.0
         last_collect_refresh = 0.0
-        render_hz = 15
+        # sim 拉高到 30fps 让交互顺畅, USB 保持 15fps
+        render_hz = 30 if self.sim else 15
 
         log.info("Daemon running. Press Ctrl+C to stop.")
         try:
             while not self._stop.is_set():
                 now = time.time()
-                # Poll device for touch events
-                self._poll_usb()
+                # 处理触摸: sim 从 queue, USB 从 device
+                self._drain_touch_queue()
+                if not self.sim:
+                    self._poll_usb()
                 # Render at fixed rate
                 if now - last_render >= 1.0 / render_hz:
                     self._render_loop()
@@ -317,13 +360,17 @@ class Daemon:
             pass
         finally:
             self._sys_collector.stop()
-            self._usb.close()
+            if self._sim is not None:
+                self._sim.stop()
+            if self._usb is not None:
+                self._usb.close()
             log.info("Daemon stopped")
 
 
-def run_daemon(foreground: bool = True, config_path: Optional[str] = None, verbose: bool = False) -> None:
+def run_daemon(foreground: bool = True, config_path: Optional[str] = None,
+               verbose: bool = False, sim: bool = False, sim_port: int = 8080) -> None:
     """Run the daemon (foreground by default)."""
-    daemon = Daemon(config_path=config_path, verbose=verbose)
+    daemon = Daemon(config_path=config_path, verbose=verbose, sim=sim, sim_port=sim_port)
     if not foreground:
         # TODO: proper daemonization
         log.warning("Daemon mode not fully implemented, running in foreground")
