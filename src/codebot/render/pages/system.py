@@ -1,126 +1,278 @@
-"""System resources page: CPU, MEM, DISK, NET metrics."""
+"""System resources page: 2x2 grid dashboard for 1.47" 320x172 LCD.
+
+Layout (see plan doc):
+  y=0-25    header: `>_ CODEBOT` + HH:MM
+  y=26-98   CPU | MEM tiles (big %, dotted bar)
+  y=99-146  NET (up/down split) | FREQ (GHz)
+  y=147-172 footer: `>_` + temp + fan + disk
+
+Consumes data from SystemCollector (2 Hz background thread) — no own psutil.
+"""
 
 from __future__ import annotations
 
-import psutil
+import time
 from typing import Optional
 
+from PIL import ImageDraw
+
+from ...collectors.system import SystemCollector
 from ..canvas import Canvas
-from ..theme import VSCodeDark, Color, SCREEN_W, SCREEN_H, INDICATOR_H, TITLE_H
-from ..widgets import draw_indicator, draw_title, draw_hint, draw_progress_bar, get_font
+from ..icons import draw_icon
+from ..theme import VSCodeDark, SCREEN_W, SCREEN_H
+from ..widgets import (
+    draw_dotted_bar,
+    draw_text_right,
+    get_font,
+)
 from .base import BasePage
-from PIL import ImageDraw, ImageFont
 
 
-def _color_for_pct(pct: float) -> Color:
-    """Pick a color based on load."""
-    if pct >= 90: return VSCodeDark.DANGER
-    if pct >= 70: return VSCodeDark.WARNING
-    return VSCodeDark.SUCCESS
+# Layout constants for the 2x2 dashboard.
+HEADER_Y = 4
+HEADER_H = 21                  # y=4..24
+
+ROW1_Y = 26                    # CPU | MEM top edge
+ROW2_Y = 99                    # NET | FREQ top edge
+ROW_H = 72                     # body row height
+FOOTER_Y = 152                 # footer baseline (icon y)
+
+CELL_W = SCREEN_W // 2         # 160
+TILE_PAD = 8                   # left/right inner padding
+ICON_SIZE = 32                 # tile icons
+FOOTER_ICON_SIZE = 12
+
+
+def _fmt_rate(kbs: float) -> str:
+    """Format a rate in KB/s; switch to MB/s above 1024."""
+    if kbs >= 1024:
+        return f"{kbs / 1024:.1f}MB/s"
+    return f"{kbs:.0f}KB/s"
+
+
+def _fmt_freq(mhz: float) -> str:
+    """Format CPU frequency: '2.83' or '—' if unavailable."""
+    if mhz <= 0:
+        return "—"
+    return f"{mhz / 1000:.2f}"
+
+
+def _draw_big_number(
+    canvas: Canvas, text: str, x_right: int, y: int,
+    font, color, max_width: int,
+) -> None:
+    """Right-align a big number, clipping with '…' if it would overflow."""
+    draw = ImageDraw.Draw(canvas.image)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    if tw > max_width:
+        # Fall back to a smaller font
+        small = get_font("mono", max(12, font.size - 8))
+        draw_text_right(canvas, text, x_right, y, small, color)
+    else:
+        draw_text_right(canvas, text, x_right, y, font, color)
 
 
 class SystemPage(BasePage):
-    """Real-time system resource monitor."""
+    """Real-time system resource monitor (2x2 dashboard)."""
 
-    title = "System"
+    # Empty title disables daemon chrome's default title — the page renders
+    # its own header (terminal prompt + "CODEBOT" + clock).
+    title = ""
 
-    def __init__(self) -> None:
-        self._last_net = psutil.net_io_counters()
-        self._last_time = 0.0
-        self._cached: dict = {}
-
-    def _sample(self) -> None:
-        """Sample current system metrics (call ~2 Hz)."""
-        import time
-        now = time.time()
-        cpu_pct = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        net = psutil.net_io_counters()
-
-        # Network rate (delta / time)
-        elapsed = now - self._last_time if self._last_time else 1.0
-        rx_rate = (net.bytes_recv - self._last_net.bytes_recv) / max(elapsed, 0.001)
-        tx_rate = (net.bytes_sent - self._last_net.bytes_sent) / max(elapsed, 0.001)
-        self._last_net = net
-        self._last_time = now
-
-        # CPU frequency (MHz)
-        try:
-            cpu_freq = psutil.cpu_freq().current
-        except (AttributeError, OSError):
-            cpu_freq = 0
-
-        self._cached = {
-            "cpu_pct": cpu_pct,
-            "cpu_freq": cpu_freq,
-            "mem_pct": mem.percent,
-            "mem_used_gb": mem.used / (1024 ** 3),
-            "mem_total_gb": mem.total / (1024 ** 3),
-            "disk_pct": disk.percent,
-            "disk_used_gb": disk.used / (1024 ** 3),
-            "disk_total_gb": disk.total / (1024 ** 3),
-            "rx_rate_kbs": rx_rate / 1024,
-            "tx_rate_kbs": tx_rate / 1024,
-        }
+    def __init__(self, collector: SystemCollector) -> None:
+        self._collector: SystemCollector = collector
 
     def render(self, canvas: Canvas) -> None:
-        self._sample()
-        d = self._cached
+        snap = self._collector.snapshot()
         canvas.fill(VSCodeDark.BG)
 
-        # Top status bar (will be drawn by daemon)
-        # Page indicator and title
-        font_label = get_font("default", 11)
-        font_value = get_font("mono", 11)
-        draw = ImageDraw.Draw(canvas.image)
+        # ---- Header (y=4-24) ----
+        draw_icon(canvas, "terminal", 4, HEADER_Y, VSCodeDark.INFO, size=14)
+        d = ImageDraw.Draw(canvas.image)
+        d.text(
+            (22, HEADER_Y), "CODEBOT",
+            fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b),
+            font=get_font("default", 16),
+        )
+        draw_text_right(
+            canvas, time.strftime("%H:%M"),
+            SCREEN_W - 4, HEADER_Y + 1,
+            get_font("mono", 18), VSCodeDark.FG_DIM,
+        )
 
-        # CPU
-        y = 30
-        draw.text((4, y), "CPU", fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font_label)
-        cpu_text = f"{d['cpu_pct']:.0f}%"
-        bbox = draw.textbbox((0, 0), cpu_text, font=font_value)
-        tw = bbox[2] - bbox[0]
-        draw.text((SCREEN_W - tw - 4, y), cpu_text, fill=(_color_for_pct(d['cpu_pct']).r, _color_for_pct(d['cpu_pct']).g, _color_for_pct(d['cpu_pct']).b), font=font_value)
-        canvas.progress_bar(4, y + 12, SCREEN_W - 8, 6, d['cpu_pct'], _color_for_pct(d['cpu_pct']), VSCodeDark.BG_PANEL)
+        if snap is None:
+            # First sample not ready; show minimal layout
+            return
 
-        # Memory
-        y = 54
-        draw.text((4, y), "MEM", fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font_label)
-        mem_text = f"{d['mem_used_gb']:.1f}/{d['mem_total_gb']:.1f}G"
-        bbox = draw.textbbox((0, 0), mem_text, font=font_value)
-        tw = bbox[2] - bbox[0]
-        draw.text((SCREEN_W - tw - 4, y), mem_text, fill=(_color_for_pct(d['mem_pct']).r, _color_for_pct(d['mem_pct']).g, _color_for_pct(d['mem_pct']).b), font=font_value)
-        canvas.progress_bar(4, y + 12, SCREEN_W - 8, 6, d['mem_pct'], _color_for_pct(d['mem_pct']), VSCodeDark.BG_PANEL)
+        # ---- CPU cell (x=0..159, y=26..98) ----
+        self._draw_cpu_tile(canvas, snap.cpu_pct)
 
-        # Disk
-        y = 78
-        draw.text((4, y), "DISK", fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font_label)
-        disk_text = f"{d['disk_used_gb']:.0f}/{d['disk_total_gb']:.0f}G"
-        bbox = draw.textbbox((0, 0), disk_text, font=font_value)
-        tw = bbox[2] - bbox[0]
-        draw.text((SCREEN_W - tw - 4, y), disk_text, fill=(_color_for_pct(d['disk_pct']).r, _color_for_pct(d['disk_pct']).g, _color_for_pct(d['disk_pct']).b), font=font_value)
-        canvas.progress_bar(4, y + 12, SCREEN_W - 8, 6, d['disk_pct'], _color_for_pct(d['disk_pct']), VSCodeDark.BG_PANEL)
+        # ---- MEM cell (x=160..319) ----
+        self._draw_mem_tile(canvas, snap.mem_pct)
 
-        # Network
-        y = 102
-        draw.text((4, y), "NET", fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font_label)
-        # Format rates nicely
-        def fmt_rate(kbs: float) -> str:
-            if kbs >= 1024: return f"{kbs/1024:.1f}MB/s"
-            return f"{kbs:.0f}KB/s"
-        net_text = f"↓{fmt_rate(d['rx_rate_kbs'])} ↑{fmt_rate(d['tx_rate_kbs'])}"
-        bbox = draw.textbbox((0, 0), net_text, font=font_value)
-        tw = bbox[2] - bbox[0]
-        draw.text((SCREEN_W - tw - 4, y), net_text, fill=(VSCodeDark.INFO.r, VSCodeDark.INFO.g, VSCodeDark.INFO.b), font=font_value)
-        # Mini network bar (24 px tall)
-        canvas.progress_bar(4, y + 14, (SCREEN_W - 8) // 2 - 2, 4,
-                            min(100, d['rx_rate_kbs'] / 100), VSCodeDark.SUCCESS, VSCodeDark.BG_PANEL)
-        canvas.progress_bar(4 + (SCREEN_W - 8) // 2 + 2, y + 14, (SCREEN_W - 8) // 2 - 2, 4,
-                            min(100, d['tx_rate_kbs'] / 100), VSCodeDark.WARNING, VSCodeDark.BG_PANEL)
+        # ---- NET cell (x=0..159, y=99..146) ----
+        self._draw_net_tile(canvas, snap.rx_rate_kbs, snap.tx_rate_kbs)
 
-        # Footer: CPU freq
-        y = 144
-        freq_text = f"CPU @ {d['cpu_freq']:.0f} MHz" if d['cpu_freq'] else ""
-        if freq_text:
-            draw.text((4, y), freq_text, fill=(VSCodeDark.FG_DIM.r, VSCodeDark.FG_DIM.g, VSCodeDark.FG_DIM.b), font=font_value)
+        # ---- FREQ cell (x=160..319) ----
+        self._draw_freq_tile(canvas, snap.cpu_freq_mhz)
+
+        # ---- Footer (y=152..168) ----
+        self._draw_footer(canvas, snap.cpu_temp_c, snap.fan_rpm, snap.disk_pct)
+
+    # ---- Per-tile helpers ----
+
+    def _draw_cpu_tile(self, canvas: Canvas, cpu_pct: float) -> None:
+        x_cell = 0
+        y_icon = ROW1_Y + 6           # 32
+        draw_icon(canvas, "cpu", x_cell + TILE_PAD, y_icon, VSCodeDark.INFO, size=ICON_SIZE)
+        # Label + big number on the right
+        draw_text_right(
+            canvas, "CPU",
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
+            get_font("default", 12), VSCodeDark.INFO,
+        )
+        _draw_big_number(
+            canvas, f"{cpu_pct:.0f}%",
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
+            get_font("mono", 36), VSCodeDark.FG, max_width=100,
+        )
+        # Dotted bar at the bottom of the cell
+        draw_dotted_bar(
+            canvas,
+            x_cell + TILE_PAD, ROW1_Y + ROW_H - 8,
+            CELL_W - 2 * TILE_PAD, 4,
+            cpu_pct, fg=VSCodeDark.INFO, n_segments=14, gap=1,
+        )
+
+    def _draw_mem_tile(self, canvas: Canvas, mem_pct: float) -> None:
+        x_cell = CELL_W
+        y_icon = ROW1_Y + 6
+        draw_icon(canvas, "mem", x_cell + TILE_PAD, y_icon, VSCodeDark.MEM_ACCENT, size=ICON_SIZE)
+        draw_text_right(
+            canvas, "MEM",
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
+            get_font("default", 12), VSCodeDark.MEM_ACCENT,
+        )
+        _draw_big_number(
+            canvas, f"{mem_pct:.0f}%",
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
+            get_font("mono", 36), VSCodeDark.FG, max_width=100,
+        )
+        draw_dotted_bar(
+            canvas,
+            x_cell + TILE_PAD, ROW1_Y + ROW_H - 8,
+            CELL_W - 2 * TILE_PAD, 4,
+            mem_pct, fg=VSCodeDark.MEM_ACCENT, n_segments=14, gap=1,
+        )
+
+    def _draw_net_tile(self, canvas: Canvas, rx_kbs: float, tx_kbs: float) -> None:
+        x_cell = 0
+        y_icon = ROW2_Y + 8           # 107
+        draw_icon(
+            canvas, "net",
+            x_cell + TILE_PAD, y_icon,
+            VSCodeDark.NET_UP, size=ICON_SIZE, color2=VSCodeDark.NET_DOWN,
+        )
+        # Label: top-left, just right of the icon
+        d = ImageDraw.Draw(canvas.image)
+        label_x = x_cell + TILE_PAD + ICON_SIZE + 6   # 46
+        d.text(
+            (label_x, ROW2_Y + 0), "NET",
+            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
+            font=get_font("default", 11),
+        )
+
+        # Auto-unit: MB/s if either side >= 1024 KB/s
+        use_mb = rx_kbs >= 1024 or tx_kbs >= 1024
+        if use_mb:
+            up_str = f"↑{rx_kbs / 1024:.1f}"
+            down_str = f"↓{tx_kbs / 1024:.1f}"
+            unit = "MB/s"
+        else:
+            up_str = f"↑{rx_kbs:.0f}"
+            down_str = f"↓{tx_kbs:.0f}"
+            unit = "KB/s"
+
+        # Two stacked value pairs (up | down) with a vertical divider
+        text_x_start = label_x
+        cell_right = x_cell + CELL_W - TILE_PAD
+        cell_mid = (text_x_start + cell_right) // 2
+
+        font_num = get_font("mono", 18)
+        font_unit = get_font("mono", 9)
+        y_num = ROW2_Y + 14
+        y_unit = ROW2_Y + 34
+
+        # Up (left of divider)
+        d.text(
+            (text_x_start, y_num), up_str,
+            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
+            font=font_num,
+        )
+        d.text(
+            (text_x_start, y_unit), unit,
+            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
+            font=font_unit,
+        )
+        # Down (right of divider)
+        d.text(
+            (cell_mid + 4, y_num), down_str,
+            fill=(VSCodeDark.NET_DOWN.r, VSCodeDark.NET_DOWN.g, VSCodeDark.NET_DOWN.b),
+            font=font_num,
+        )
+        d.text(
+            (cell_mid + 4, y_unit), unit,
+            fill=(VSCodeDark.NET_DOWN.r, VSCodeDark.NET_DOWN.g, VSCodeDark.NET_DOWN.b),
+            font=font_unit,
+        )
+        # Vertical divider
+        d.line(
+            [(cell_mid, ROW2_Y + 4), (cell_mid, ROW2_Y + ROW_H - 4)],
+            fill=(VSCodeDark.BORDER.r, VSCodeDark.BORDER.g, VSCodeDark.BORDER.b),
+            width=1,
+        )
+
+    def _draw_freq_tile(self, canvas: Canvas, freq_mhz: float) -> None:
+        x_cell = CELL_W
+        y_icon = ROW2_Y + 14
+        draw_icon(canvas, "freq", x_cell + TILE_PAD, y_icon, VSCodeDark.FREQ_ACCENT, size=ICON_SIZE)
+        draw_text_right(
+            canvas, "FREQ",
+            x_cell + CELL_W - TILE_PAD, ROW2_Y + 2,
+            get_font("default", 12), VSCodeDark.FREQ_ACCENT,
+        )
+        # "2.83 GHz"
+        freq_str = _fmt_freq(freq_mhz)
+        draw_text_right(
+            canvas, freq_str,
+            x_cell + CELL_W - TILE_PAD - 26, ROW2_Y + 18,
+            get_font("mono", 28), VSCodeDark.FG,
+        )
+        # "GHz" small label to the right of the number
+        draw_text_right(
+            canvas, "GHz",
+            x_cell + CELL_W - TILE_PAD, ROW2_Y + 28,
+            get_font("mono", 12), VSCodeDark.FG_DIM,
+        )
+
+    def _draw_footer(
+        self, canvas: Canvas,
+        cpu_temp_c: Optional[float], fan_rpm: Optional[int], disk_pct: float,
+    ) -> None:
+        d = ImageDraw.Draw(canvas.image)
+        dim = (VSCodeDark.FG_DIM.r, VSCodeDark.FG_DIM.g, VSCodeDark.FG_DIM.b)
+        font = get_font("mono", 11)
+        # `>_` prompt
+        draw_icon(canvas, "terminal", 4, FOOTER_Y, VSCodeDark.INFO, size=FOOTER_ICON_SIZE)
+        # thermo
+        draw_icon(canvas, "thermo", 60, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
+        temp_text = f"{cpu_temp_c:.0f}°C" if cpu_temp_c is not None else "—"
+        d.text((74, FOOTER_Y + 1), temp_text, fill=dim, font=font)
+        # fan
+        draw_icon(canvas, "fan", 140, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
+        fan_text = f"{fan_rpm} RPM" if fan_rpm is not None else "—"
+        d.text((154, FOOTER_Y + 1), fan_text, fill=dim, font=font)
+        # disk
+        draw_icon(canvas, "disk", 220, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
+        d.text((234, FOOTER_Y + 1), f"{disk_pct:.0f}%", fill=dim, font=font)

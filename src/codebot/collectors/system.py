@@ -13,6 +13,9 @@ from typing import Optional
 class SystemSnapshot:
     cpu_pct: float
     cpu_freq_mhz: float
+    cores_logical: int
+    cpu_temp_c: Optional[float]
+    fan_rpm: Optional[int]
     mem_pct: float
     mem_used_gb: float
     mem_total_gb: float
@@ -80,9 +83,36 @@ class SystemCollector:
         except (AttributeError, OSError):
             cpu_freq = 0
 
+        cores_logical = psutil.cpu_count(logical=True) or 0
+
+        # First available sensor reading; psutil returns {} on systems without
+        # sensors (e.g. macOS, some VMs), so this degrades to None gracefully.
+        cpu_temp_c: Optional[float] = None
+        try:
+            temps = psutil.sensors_temperatures(fahrenheit=False)
+            for entries in temps.values():
+                if entries:
+                    cpu_temp_c = entries[0].current
+                    break
+        except (AttributeError, OSError):
+            pass
+
+        fan_rpm: Optional[int] = None
+        try:
+            fans = psutil.sensors_fans()
+            for entries in fans.values():
+                if entries:
+                    fan_rpm = int(entries[0].current)
+                    break
+        except (AttributeError, OSError):
+            pass
+
         snap = SystemSnapshot(
             cpu_pct=cpu_pct,
             cpu_freq_mhz=cpu_freq,
+            cores_logical=cores_logical,
+            cpu_temp_c=cpu_temp_c,
+            fan_rpm=fan_rpm,
             mem_pct=mem.percent,
             mem_used_gb=mem.used / (1024 ** 3),
             mem_total_gb=mem.total / (1024 ** 3),

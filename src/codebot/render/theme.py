@@ -66,6 +66,15 @@ class VSCodeDark:
     INDICATOR_BASE    = Color(86, 156, 214)    # #569CD6
     INDICATOR_ACTIVE  = Color(220, 220, 170)    # #DCDCAA
 
+    # Dashboard tile accents (SystemPage 2x2 grid)
+    MEM_ACCENT        = Color(197, 134, 192)    # #C586C0 (VSCode purple)
+    NET_UP            = Color(78, 201, 176)     # #4EC9B0 (= SUCCESS)
+    NET_DOWN          = Color(86, 192, 230)     # #56C0E6 (cyan)
+    FREQ_ACCENT       = Color(86, 156, 214)     # #569CD6 (= INFO)
+
+    # Dotted-bar "off" cell color (slightly above BG)
+    BAR_DIM           = Color(50, 50, 50)       # #323232
+
 
 # Display dimensions
 SCREEN_W = 320

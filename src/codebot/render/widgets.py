@@ -98,3 +98,44 @@ def draw_progress_bar(
         bbox = draw.textbbox((0, 0), value_text, font=font)
         tw = bbox[2] - bbox[0]
         draw.text((x + w - tw, y - 12), value_text, fill=(VSCodeDark.WARNING.r, VSCodeDark.WARNING.g, VSCodeDark.WARNING.b), font=font)
+
+
+def draw_dotted_bar(
+    canvas: Canvas,
+    x: int, y: int, w: int, h: int,
+    pct: float,
+    fg: Color,
+    bg: Color = Color(50, 50, 50),
+    n_segments: int = 14,
+    gap: int = 1,
+) -> None:
+    """Draw a segmented (dotted) horizontal bar — battery/level-meter style.
+
+    `n_segments` cells across width `w`, each `cell_w` wide, separated by `gap` px.
+    First `fill_n = round(pct / 100 * n_segments)` cells get `fg`, the rest get `bg`.
+    """
+    if w <= 0 or h <= 0 or n_segments <= 0:
+        return
+    # Each cell: integer width. Total occupied = n * cell_w + (n-1) * gap. Solve for cell_w.
+    cell_w = max(1, (w - (n_segments - 1) * gap) // n_segments)
+    fill_n = max(0, min(n_segments, round(pct / 100.0 * n_segments)))
+    for i in range(n_segments):
+        cx = x + i * (cell_w + gap)
+        color = fg if i < fill_n else bg
+        canvas.paste_rect(color, cx, y, cell_w, h)
+
+
+def draw_text_right(
+    canvas: Canvas,
+    s: str,
+    x_right: int,
+    y: int,
+    font: ImageFont.ImageFont,
+    color: Color,
+) -> int:
+    """Draw text right-aligned so it ends at x_right. Returns the width drawn."""
+    draw = ImageDraw.Draw(canvas.image)
+    bbox = draw.textbbox((0, 0), s, font=font)
+    tw = bbox[2] - bbox[0]
+    draw.text((x_right - tw, y), s, fill=(color.r, color.g, color.b), font=font)
+    return tw

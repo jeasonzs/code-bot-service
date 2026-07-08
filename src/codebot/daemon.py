@@ -41,7 +41,7 @@ log = logging.getLogger("codebot")
 def make_pages() -> list:
     """Create the default 7-page list."""
     return [
-        SystemPage(),         # 1
+        SystemPage(collector=None),  # 1 — collector wired in Daemon.__init__
         QuickActionsPage(),   # 2
         GithubPage(),         # 3
         ClaudePage(),         # 4
@@ -66,6 +66,11 @@ class Daemon:
         self._pages = make_pages()
         self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
+        # Wire the shared collector into SystemPage (constructed with None placeholder)
+        for p in self._pages:
+            if isinstance(p, SystemPage):
+                p._collector = self._sys_collector
+                break
         self._actions_page: Optional[CustomActionsPage] = None
         self._custom_subpage = 0
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
