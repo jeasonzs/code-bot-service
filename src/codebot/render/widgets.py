@@ -17,7 +17,10 @@ _font_cache: dict[tuple[str, int], ImageFont.ImageFont] = {}
 
 
 # Project-bundled font directory (for DSEG 7-segment).
-_FONTS_DIR = Path(__file__).resolve().parent.parent.parent / "fonts"
+# Path: <repo>/code-bot-service/fonts/
+# widgets.py is at <repo>/code-bot-service/src/codebot/render/widgets.py
+# 4 levels up gets us to <repo>/code-bot-service/
+_FONTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "fonts"
 
 
 def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
