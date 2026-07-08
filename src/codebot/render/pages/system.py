@@ -62,12 +62,40 @@ def _draw_big_number(
     canvas: Canvas, text: str, x_right: int, y: int,
     font, color, max_width: int,
 ) -> None:
-    """Right-align a big number, falling back to a smaller bold font on overflow."""
+    """Right-align a big number; trailing '%' rendered in bold (DSEG lacks it)."""
     draw = ImageDraw.Draw(canvas.image)
+    rgb = (color.r, color.g, color.b)
+
+    # Special case: DSEG digit font doesn't have '%' (or '.', '/', etc.).
+    # If the text ends with a non-DSEG suffix (commonly '%'), render the
+    # digit part in the main font and the suffix in bold, right-aligned.
+    if text.endswith("%") and font.size >= 24:
+        digits = text[:-1]
+        suffix = "%"
+        suffix_font = get_font("bold", max(12, font.size * 2 // 3))
+        bw_d = draw.textbbox((0, 0), digits, font=font)
+        w_d = bw_d[2] - bw_d[0]
+        bw_s = draw.textbbox((0, 0), suffix, font=suffix_font)
+        w_s = bw_s[2] - bw_s[0]
+        gap = 2
+        # Right-align: % ends at x_right; digits end at x_right - w_s - gap
+        x_suffix = x_right - w_s
+        x_digits_right = x_suffix - gap
+        # Vertically align bottoms of the two fonts
+        y_suffix = y + (font.size - suffix_font.size)
+        if w_d + w_s + gap > max_width:
+            # Overflow: fall back to bold for the whole thing
+            small = get_font("bold", max(12, font.size - 8))
+            draw_text_right(canvas, text, x_right, y, small, color)
+            return
+        draw.text((x_digits_right - w_d, y), digits, fill=rgb, font=font)
+        draw.text((x_suffix, y_suffix), suffix, fill=rgb, font=suffix_font)
+        return
+
+    # Generic path
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     if tw > max_width:
-        # Fall back to a smaller bold font (same weight family)
         small = get_font("bold", max(12, font.size - 8))
         draw_text_right(canvas, text, x_right, y, small, color)
     else:
