@@ -19,7 +19,7 @@ from .protocol import (
     build_clear, build_set_brightness,
     build_draw_rect_begin, build_draw_rect_end, build_draw_rect_abort,
 )
-from .render.canvas import Canvas
+from .render.canvas import Canvas, DirtyRect
 from .render.widgets import draw_indicator, draw_title
 from .render.theme import VSCodeDark, SCREEN_W, SCREEN_H
 from .render.pages.system import SystemPage
@@ -68,6 +68,8 @@ class Daemon:
         self._sys_collector = SystemCollector(hz=2.0)
         self._actions_page: Optional[CustomActionsPage] = None
         self._custom_subpage = 0
+        # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
+        self._force_full_flush = True
         for p in self._pages:
             if isinstance(p, CustomActionsPage):
                 self._actions_page = p
@@ -233,12 +235,12 @@ class Daemon:
                 draw.text((SCREEN_W - tw - 6, 8), txt, fill=(VSCodeDark.WARNING.r, VSCodeDark.WARNING.g, VSCodeDark.WARNING.b), font=font2)
 
     def _flush_to_device(self) -> None:
-        """Send dirty rects to the device via v3 protocol (BEGIN + EP5 stream).
+        """Send dirty rects to the device via v3 protocol (BEGIN + EP5 stream + END).
 
         v3 flow per rect:
           1. EP1 OUT: DRAW_RECT_BEGIN {x,y,w,h}  (9B)
           2. EP5 OUT: raw pixel data (64B/包, 任意包数)
-          3. (设备自动 CS_HIGH, 字节数到齐即结束)
+          3. EP1 OUT: DRAW_RECT_END  (1B, 必须发: 固件 stateless, host 不发 CS 不拉高)
         """
         rects = self._canvas.find_dirty_rects()
         if not rects:
@@ -266,6 +268,15 @@ class Daemon:
                 )
                 n_err += 1
                 self._usb.send_frame(build_draw_rect_abort(), timeout=200)
+                continue
+
+            # 3. 发 END 关 CS (固件 stateless, 不发 CS 不会拉高, 后续 SPI 命令会被当像素吞掉)
+            if not self._usb.send_frame(build_draw_rect_end(), timeout=200):
+                log.warning(
+                    "Rect (%d,%d,%d,%d) END send failed (CS may stay LOW)",
+                    r.x, r.y, r.w, r.h
+                )
+                n_err += 1
                 continue
 
             n_ok += 1
