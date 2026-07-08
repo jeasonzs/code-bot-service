@@ -307,7 +307,8 @@ class Daemon:
     def _render_loop(self) -> None:
         """Main render loop: render, draw chrome, push to device or sim."""
         self._render_current()
-        self._draw_chrome()
+        if not self._pages[self._current_page].skip_chrome:
+            self._draw_chrome()
         if self.sim:
             # sim: 直接 publish full frame (Pillow Image), SimServer 处理锁
             self._sim.update_image(self._canvas.image)

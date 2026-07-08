@@ -16,11 +16,18 @@ from .theme import Color, VSCodeDark, SCREEN_W, INDICATOR_H, TITLE_H
 _font_cache: dict[tuple[str, int], ImageFont.ImageFont] = {}
 
 
+# Project-bundled font directory (for DSEG 7-segment).
+_FONTS_DIR = Path(__file__).resolve().parent.parent.parent / "fonts"
+
+
 def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
     """Get a font (with caching).
 
-    Tries to load JetBrains Mono or Cascadia Code (monospace) for numbers.
-    Falls back to default if not available.
+    Names:
+      "default"  — PIL load_default (no asset needed)
+      "mono"     — DejaVu Sans Mono / JetBrains Mono (whichever is installed)
+      "bold"     — DejaVu Sans Mono Bold (heavier weight, same family as "mono")
+      "digital"  — DSEG7-Classic-Bold (7-segment display, bundled in fonts/)
     """
     key = (name, size)
     if key in _font_cache:
@@ -28,20 +35,34 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
 
     font = None
     if name == "mono":
-        # Try common monospace fonts
         candidates = [
             "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/Library/Fonts/JetBrainsMono-Regular.ttf",  # macOS
             "C:\\Windows\\Fonts\\consola.ttf",  # Windows
         ]
-        for path in candidates:
-            if Path(path).exists():
-                try:
-                    font = ImageFont.truetype(path, size)
-                    break
-                except OSError:
-                    continue
+    elif name == "bold":
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        ]
+    elif name == "digital":
+        # 7-segment display font, bundled with the project
+        candidates = [
+            str(_FONTS_DIR / "DSEG7Classic-Bold.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",  # fallback
+        ]
+    else:
+        candidates = []
+
+    for path in candidates:
+        if Path(path).exists():
+            try:
+                font = ImageFont.truetype(path, size)
+                break
+            except OSError:
+                continue
     if font is None:
         font = ImageFont.load_default(size=size)
     _font_cache[key] = font

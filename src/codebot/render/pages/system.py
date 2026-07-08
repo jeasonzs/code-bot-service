@@ -29,13 +29,14 @@ from .base import BasePage
 
 
 # Layout constants for the 2x2 dashboard.
-HEADER_Y = 4
-HEADER_H = 21                  # y=4..24
+# (No top page-indicator bar — SystemPage sets skip_chrome=True.)
+HEADER_Y = 0
+HEADER_H = 22                  # y=0..21
 
-ROW1_Y = 26                    # CPU | MEM top edge
-ROW2_Y = 99                    # NET | FREQ top edge
+ROW1_Y = 22                    # CPU | MEM top edge
+ROW2_Y = 94                    # NET | FREQ top edge
 ROW_H = 72                     # body row height
-FOOTER_Y = 152                 # footer baseline (icon y)
+FOOTER_Y = 148                 # footer baseline (icon y)
 
 CELL_W = SCREEN_W // 2         # 160
 TILE_PAD = 8                   # left/right inner padding
@@ -61,13 +62,13 @@ def _draw_big_number(
     canvas: Canvas, text: str, x_right: int, y: int,
     font, color, max_width: int,
 ) -> None:
-    """Right-align a big number, clipping with '…' if it would overflow."""
+    """Right-align a big number, falling back to a smaller bold font on overflow."""
     draw = ImageDraw.Draw(canvas.image)
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     if tw > max_width:
-        # Fall back to a smaller font
-        small = get_font("mono", max(12, font.size - 8))
+        # Fall back to a smaller bold font (same weight family)
+        small = get_font("bold", max(12, font.size - 8))
         draw_text_right(canvas, text, x_right, y, small, color)
     else:
         draw_text_right(canvas, text, x_right, y, font, color)
@@ -79,6 +80,8 @@ class SystemPage(BasePage):
     # Empty title disables daemon chrome's default title — the page renders
     # its own header (terminal prompt + "CODEBOT" + clock).
     title = ""
+    # Skip the top page-indicator bar; the page fills the entire screen.
+    skip_chrome = True
 
     def __init__(self, collector: SystemCollector) -> None:
         self._collector: SystemCollector = collector
@@ -87,18 +90,18 @@ class SystemPage(BasePage):
         snap = self._collector.snapshot()
         canvas.fill(VSCodeDark.BG)
 
-        # ---- Header (y=4-24) ----
+        # ---- Header (y=0-21) ----
         draw_icon(canvas, "terminal", 4, HEADER_Y, VSCodeDark.INFO, size=14)
         d = ImageDraw.Draw(canvas.image)
         d.text(
             (22, HEADER_Y), "CODEBOT",
             fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b),
-            font=get_font("default", 16),
+            font=get_font("bold", 16),
         )
         draw_text_right(
             canvas, time.strftime("%H:%M"),
             SCREEN_W - 4, HEADER_Y + 1,
-            get_font("mono", 18), VSCodeDark.FG_DIM,
+            get_font("bold", 18), VSCodeDark.FG_DIM,
         )
 
         if snap is None:
@@ -124,18 +127,18 @@ class SystemPage(BasePage):
 
     def _draw_cpu_tile(self, canvas: Canvas, cpu_pct: float) -> None:
         x_cell = 0
-        y_icon = ROW1_Y + 6           # 32
+        y_icon = ROW1_Y + 6
         draw_icon(canvas, "cpu", x_cell + TILE_PAD, y_icon, VSCodeDark.INFO, size=ICON_SIZE)
         # Label + big number on the right
         draw_text_right(
             canvas, "CPU",
             x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
-            get_font("default", 12), VSCodeDark.INFO,
+            get_font("bold", 12), VSCodeDark.INFO,
         )
         _draw_big_number(
             canvas, f"{cpu_pct:.0f}%",
             x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
-            get_font("mono", 36), VSCodeDark.FG, max_width=100,
+            get_font("digital", 36), VSCodeDark.FG, max_width=100,
         )
         # Dotted bar at the bottom of the cell
         draw_dotted_bar(
@@ -152,12 +155,12 @@ class SystemPage(BasePage):
         draw_text_right(
             canvas, "MEM",
             x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
-            get_font("default", 12), VSCodeDark.MEM_ACCENT,
+            get_font("bold", 12), VSCodeDark.MEM_ACCENT,
         )
         _draw_big_number(
             canvas, f"{mem_pct:.0f}%",
             x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
-            get_font("mono", 36), VSCodeDark.FG, max_width=100,
+            get_font("digital", 36), VSCodeDark.FG, max_width=100,
         )
         draw_dotted_bar(
             canvas,
@@ -176,11 +179,11 @@ class SystemPage(BasePage):
         )
         # Label: top-left, just right of the icon
         d = ImageDraw.Draw(canvas.image)
-        label_x = x_cell + TILE_PAD + ICON_SIZE + 6   # 46
+        label_x = x_cell + TILE_PAD + ICON_SIZE + 6
         d.text(
             (label_x, ROW2_Y + 0), "NET",
             fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
-            font=get_font("default", 11),
+            font=get_font("bold", 11),
         )
 
         # Auto-unit: MB/s if either side >= 1024 KB/s
@@ -199,8 +202,8 @@ class SystemPage(BasePage):
         cell_right = x_cell + CELL_W - TILE_PAD
         cell_mid = (text_x_start + cell_right) // 2
 
-        font_num = get_font("mono", 18)
-        font_unit = get_font("mono", 9)
+        font_num = get_font("bold", 18)
+        font_unit = get_font("bold", 9)
         y_num = ROW2_Y + 14
         y_unit = ROW2_Y + 34
 
@@ -240,20 +243,20 @@ class SystemPage(BasePage):
         draw_text_right(
             canvas, "FREQ",
             x_cell + CELL_W - TILE_PAD, ROW2_Y + 2,
-            get_font("default", 12), VSCodeDark.FREQ_ACCENT,
+            get_font("bold", 12), VSCodeDark.FREQ_ACCENT,
         )
         # "2.83 GHz"
         freq_str = _fmt_freq(freq_mhz)
         draw_text_right(
             canvas, freq_str,
             x_cell + CELL_W - TILE_PAD - 26, ROW2_Y + 18,
-            get_font("mono", 28), VSCodeDark.FG,
+            get_font("digital", 28), VSCodeDark.FG,
         )
         # "GHz" small label to the right of the number
         draw_text_right(
             canvas, "GHz",
             x_cell + CELL_W - TILE_PAD, ROW2_Y + 28,
-            get_font("mono", 12), VSCodeDark.FG_DIM,
+            get_font("bold", 12), VSCodeDark.FG_DIM,
         )
 
     def _draw_footer(
@@ -262,7 +265,7 @@ class SystemPage(BasePage):
     ) -> None:
         d = ImageDraw.Draw(canvas.image)
         dim = (VSCodeDark.FG_DIM.r, VSCodeDark.FG_DIM.g, VSCodeDark.FG_DIM.b)
-        font = get_font("mono", 11)
+        font = get_font("bold", 11)
         # `>_` prompt
         draw_icon(canvas, "terminal", 4, FOOTER_Y, VSCodeDark.INFO, size=FOOTER_ICON_SIZE)
         # thermo

@@ -75,19 +75,46 @@ def _draw_net(
     d: ImageDraw.ImageDraw, x: int, y: int, n: int,
     color_up: Color, color_down: Color,
 ) -> None:
-    """Stacked up/down arrows. Top half = up arrow, bottom half = down arrow."""
+    """Stacked up/down arrows with shafts (proper arrow shape, not just triangles).
+
+    Top half: up arrow — triangle head on top, rectangular shaft below.
+    Bottom half: down arrow — shaft on top, triangle head pointing down.
+    """
+    rgb_up = _rgb(color_up)
+    rgb_down = _rgb(color_down)
     half = n // 2
+
+    # Geometry within each half (height = half):
+    #   head 60%, shaft 40%
+    head_h = max(4, half * 3 // 5)
+    shaft_h = half - head_h
+    head_half_w = max(3, n // 3)   # arrowhead half-width
+    shaft_w = max(2, n // 5)       # shaft width (centered)
     cx = x + n // 2
-    # Up arrow (top half): apex at top-center, base at half-height
+    shaft_x0 = cx - shaft_w // 2
+    shaft_x1 = shaft_x0 + shaft_w - 1
+
+    # ---- Up arrow (top half): head apex at y, base at y+head_h-1; shaft below ----
+    head_apex_y = y
+    head_base_y = y + head_h - 1
     d.polygon(
-        [(cx, y), (x, y + half - 1), (x + n - 1, y + half - 1)],
-        fill=_rgb(color_up),
+        [(cx, head_apex_y), (cx - head_half_w, head_base_y), (cx + head_half_w, head_base_y)],
+        fill=rgb_up,
     )
-    # Down arrow (bottom half): apex at bottom-center, base at half-height
+    shaft_top = head_base_y + 1
+    shaft_bot = shaft_top + shaft_h - 1
+    d.rectangle([(shaft_x0, shaft_top), (shaft_x1, shaft_bot)], fill=rgb_up)
+
+    # ---- Down arrow (bottom half): shaft on top, head apex at y+n-1 ----
+    head_apex_y_d = y + n - 1
+    head_base_y_d = head_apex_y_d - head_h + 1
     d.polygon(
-        [(cx, y + n - 1), (x, y + half), (x + n - 1, y + half)],
-        fill=_rgb(color_down),
+        [(cx, head_apex_y_d), (cx - head_half_w, head_base_y_d), (cx + head_half_w, head_base_y_d)],
+        fill=rgb_down,
     )
+    shaft_top_d = y + half
+    shaft_bot_d = head_base_y_d - 1
+    d.rectangle([(shaft_x0, shaft_top_d), (shaft_x1, shaft_bot_d)], fill=rgb_down)
 
 
 def _draw_freq(d: ImageDraw.ImageDraw, x: int, y: int, n: int, color: Color) -> None:

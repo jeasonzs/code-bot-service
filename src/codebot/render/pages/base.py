@@ -22,6 +22,10 @@ class BasePage(ABC):
     #: Whether this page is enabled (from YAML config)
     enabled: bool = True
 
+    #: Set True to skip the daemon chrome (top page-indicator bar + title).
+    #: Pages that draw their own header (e.g. SystemPage 2x2 dashboard) set this.
+    skip_chrome: bool = False
+
     @abstractmethod
     def render(self, canvas: Canvas) -> None:
         """Render the page content into the canvas.
