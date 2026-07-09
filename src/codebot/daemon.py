@@ -29,6 +29,7 @@ from .render.pages.placeholders import ClaudePage, OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
 from .render.pages.custom_actions import CustomActionsPage
 from .collectors.system import SystemCollector
+from .collectors.github import GithubCollector
 from .actions.base import get_executor
 
 
@@ -43,7 +44,7 @@ def make_pages() -> list:
     return [
         SystemPage(collector=None),  # 1 — collector wired in Daemon.__init__
         QuickActionsPage(),   # 2
-        GithubPage(),         # 3
+        GithubPage(collector=None),  # 3 — collector wired in Daemon.__init__
         ClaudePage(),         # 4
         OpenclawPage(),       # 5
         HermesPage(),         # 6
@@ -66,11 +67,17 @@ class Daemon:
         self._pages = make_pages()
         self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
-        # Wire the shared collector into SystemPage (constructed with None placeholder)
+        # GitHub stats refresh every 60s (well under the 5000 req/h limit
+        # of a token-authenticated user). If GITHUB_TOKEN is unset the
+        # collector simply never starts and the page shows "—".
+        self._gh_collector = GithubCollector(refresh_interval=60.0)
+        # Wire the shared collectors into their pages (constructed with
+        # ``None`` placeholders above).
         for p in self._pages:
             if isinstance(p, SystemPage):
                 p._collector = self._sys_collector
-                break
+            elif isinstance(p, GithubPage):
+                p._gh_collector = self._gh_collector
         self._actions_page: Optional[CustomActionsPage] = None
         self._custom_subpage = 0
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
@@ -344,6 +351,7 @@ class Daemon:
 
         # Start collectors
         self._sys_collector.start()
+        self._gh_collector.start()
         for p in self._pages:
             if hasattr(p, "refresh"):
                 p.refresh()
@@ -377,6 +385,7 @@ class Daemon:
             pass
         finally:
             self._sys_collector.stop()
+            self._gh_collector.stop()
             if self._sim is not None:
                 self._sim.stop()
             if self._usb is not None:
