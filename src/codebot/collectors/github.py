@@ -1,11 +1,16 @@
 """GitHub API collector: user activity, total repo stars, latest CI run.
 
-Pulls data from api.github.com using a personal access token from the
-``GITHUB_TOKEN`` environment variable. Designed to run as a background
-thread (one full refresh every ``refresh_interval`` seconds) and degrade
-gracefully when the token is missing or the API is unreachable — in
-that case ``snapshot()`` returns a snapshot with all fields ``None`` and
-the page renders ``—`` for every tile.
+Pulls data from api.github.com using a personal access token. Token
+lookup order (first match wins):
+
+  1. ``$GITHUB_TOKEN`` environment variable (12-factor / CI override)
+  2. ``Config`` (defaults to ``~/.code_bot/config.yml``)
+
+Designed to run as a background thread (one full refresh every
+``refresh_interval`` seconds) and degrade gracefully when no token is
+available or the API is unreachable — in that case ``snapshot()``
+returns a snapshot with all fields ``None`` and the page renders ``—``
+for every tile.
 
 Fetching strategy
 -----------------
@@ -64,18 +69,43 @@ def _empty_snapshot() -> GithubSnapshot:
     )
 
 
+def _age_minutes(iso: Optional[str]) -> Optional[int]:
+    if not iso:
+        return None
+    try:
+        ct = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return max(0, int((time.time() - ct.timestamp()) / 60))
+    except (ValueError, TypeError):
+        return None
+
+
 class GithubCollector:
     """Background thread that refreshes GitHub stats every ``refresh_interval``."""
 
     def __init__(self, refresh_interval: float = 60.0,
-                 ci_repo: str = "code-bot") -> None:
+                 ci_repo: str = "code-bot",
+                 config: Optional["Config"] = None) -> None:
         self.refresh_interval = refresh_interval
-        self._ci_repo_name = ci_repo  # the only repo we monitor for CI
-        self._token = (os.environ.get("GITHUB_TOKEN") or "").strip()
         self._lock = threading.Lock()
         self._latest: GithubSnapshot = _empty_snapshot()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # Resolve the token + ci_repo. Env vars win over the config
+        # file (12-factor / CI override); config file wins over the
+        # hardcoded default. Config is constructed lazily here so the
+        # collector can still be used standalone (tests, scripts).
+        if config is None:
+            from ..config import Config
+            config = Config()
+        env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+        env_repo = (os.environ.get("GITHUB_CI_REPO") or "").strip()
+        cfg_token = config.get("github", "token") or ""
+        cfg_repo = config.get("github", "ci_repo") or ci_repo
+        self._token = env_token or cfg_token
+        self._ci_repo_name = env_repo or cfg_repo
+        if not env_token and cfg_token:
+            log.info("Loaded GitHub token from %s", config.path)
 
     @property
     def has_token(self) -> bool:
@@ -227,13 +257,3 @@ class GithubCollector:
         run_num = r.get("run_number")
         age_min = _age_minutes(r.get("created_at"))
         return (combined, wf, repo, run_num, age_min)
-
-
-def _age_minutes(iso: Optional[str]) -> Optional[int]:
-    if not iso:
-        return None
-    try:
-        ct = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return max(0, int((time.time() - ct.timestamp()) / 60))
-    except (ValueError, TypeError):
-        return None

@@ -30,6 +30,7 @@ from .render.pages.shortcuts import ShortcutsPage
 from .render.pages.custom_actions import CustomActionsPage
 from .collectors.system import SystemCollector
 from .collectors.github import GithubCollector
+from .config import Config
 from .actions.base import get_executor
 
 
@@ -67,10 +68,14 @@ class Daemon:
         self._pages = make_pages()
         self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
+        # Load (and create if missing) the per-user config file. The
+        # collector uses it for the GitHub token; future subsystems can
+        # share the same instance.
+        self._config = Config()
         # GitHub stats refresh every 60s (well under the 5000 req/h limit
         # of a token-authenticated user). If GITHUB_TOKEN is unset the
         # collector simply never starts and the page shows "—".
-        self._gh_collector = GithubCollector(refresh_interval=60.0)
+        self._gh_collector = GithubCollector(refresh_interval=60.0, config=self._config)
         # Wire the shared collectors into their pages (constructed with
         # ``None`` placeholders above).
         for p in self._pages:
