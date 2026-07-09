@@ -179,3 +179,61 @@ def draw_text_centered(
     tw = bbox[2] - bbox[0]
     draw.text((cx - tw // 2, y), s, fill=(color.r, color.g, color.b), font=font)
     return tw
+
+
+def draw_value_with_unit(
+    canvas: Canvas,
+    digits: str,
+    unit: str,
+    x_right: int,
+    y: int,
+    digits_font: ImageFont.ImageFont,
+    unit_font: ImageFont.ImageFont,
+    digits_color: Color,
+    unit_color: Color,
+    max_digits_width: int,
+) -> None:
+    """Right-align a big numeric value with a small unit suffix.
+
+    Layout: [digits (big)] [unit (small)], both right-aligned to x_right.
+    The unit is rendered lower (y offset = digits_font.size - unit_font.size)
+    so it sits on the same visual baseline as the digits.
+
+    If `digits` doesn't fit `max_digits_width` even after shrinking the
+    font, falls back to a single-line right-aligned render at a smaller size.
+
+    Used by the dashboard tiles where the main value is in DSEG (digits
+    font) and the unit (e.g. "%", "GHz", "°C") is in bold (unit font),
+    since DSEG only ships the 10 digits.
+    """
+    draw = ImageDraw.Draw(canvas.image)
+    rgb_d = (digits_color.r, digits_color.g, digits_color.b)
+    rgb_u = (unit_color.r, unit_color.g, unit_color.b)
+
+    if not unit:
+        # No unit: just right-align the digits.
+        bbox = draw.textbbox((0, 0), digits, font=digits_font)
+        tw = bbox[2] - bbox[0]
+        if tw > max_digits_width:
+            small = get_font("bold", max(12, digits_font.size - 8))
+            draw_text_right(canvas, digits, x_right, y, small, digits_color)
+        else:
+            draw_text_right(canvas, digits, x_right, y, digits_font, digits_color)
+        return
+
+    bw_u = draw.textbbox((0, 0), unit, font=unit_font)
+    w_u = bw_u[2] - bw_u[0]
+    y_unit = y + (digits_font.size - unit_font.size)
+
+    # Unit sits at x_right, digits to its left.
+    draw.text((x_right - w_u, y_unit), unit, fill=rgb_u, font=unit_font)
+    x_digits_right = x_right - w_u - 4
+
+    bw_d = draw.textbbox((0, 0), digits, font=digits_font)
+    w_d = bw_d[2] - bw_d[0]
+    if w_d + w_u + 4 > max_digits_width:
+        # Doesn't fit side-by-side: shrink to a single line at smaller size.
+        small = get_font("bold", max(12, digits_font.size - 8))
+        draw_text_right(canvas, digits + unit, x_right, y, small, digits_color)
+        return
+    draw.text((x_digits_right - w_d, y), digits, fill=rgb_d, font=digits_font)
