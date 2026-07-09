@@ -49,32 +49,36 @@ _STARS_MAX_PAGES = 10
 class GithubSnapshot:
     user: Optional[str]            # login of the authenticated user
     stars: Optional[int]           # sum of stargazers_count across user's repos
-    streak: Optional[int]          # always None (streak not computed)
+    followers: Optional[int]       # people following the user (from /user.followers)
     commits_today: Optional[int]   # commits authored by user since 00:00 UTC
     open_prs: Optional[int]        # open PRs authored by user
-    ci_status: Optional[str]       # success / failure / in_progress / queued / ...
-    ci_workflow: Optional[str]     # workflow display name
-    ci_repo: Optional[str]         # "owner/repo" of the run
-    ci_run_number: Optional[int]
-    ci_age_min: Optional[int]      # minutes since the run was created
-    ts: float                      # unix time of the snapshot
+    # Latest public event in the user's activity feed (from
+    # /users/{user}/events). The page renders these into a one-liner
+    # like "Push main 2 min ago".
+    latest_event_type: Optional[str]    # "PushEvent" / "PullRequestEvent" / ...
+    latest_event_object: Optional[str]  # branch / PR title / repo name, etc.
+    latest_event_repo: Optional[str]    # short repo name, e.g. "code-bot-service"
+    latest_event_ts: Optional[float]    # unix time of the event
+    ts: float                           # unix time of the snapshot
 
 
 def _empty_snapshot() -> GithubSnapshot:
     return GithubSnapshot(
-        user=None, stars=None, streak=None,
+        user=None, stars=None, followers=None,
         commits_today=None, open_prs=None,
-        ci_status=None, ci_workflow=None, ci_repo=None,
-        ci_run_number=None, ci_age_min=None, ts=0.0,
+        latest_event_type=None, latest_event_object=None,
+        latest_event_repo=None, latest_event_ts=None,
+        ts=0.0,
     )
 
 
-def _age_minutes(iso: Optional[str]) -> Optional[int]:
+def _event_unix_ts(iso: Optional[str]) -> Optional[float]:
+    """Parse a GitHub ISO 8601 timestamp into a unix float (seconds)."""
     if not iso:
         return None
     try:
         ct = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return max(0, int((time.time() - ct.timestamp()) / 60))
+        return ct.timestamp()
     except (ValueError, TypeError):
         return None
 
@@ -83,7 +87,6 @@ class GithubCollector:
     """Background thread that refreshes GitHub stats every ``refresh_interval``."""
 
     def __init__(self, refresh_interval: float = 60.0,
-                 ci_repo: str = "code-bot",
                  config: Optional["Config"] = None) -> None:
         self.refresh_interval = refresh_interval
         self._lock = threading.Lock()
@@ -91,19 +94,13 @@ class GithubCollector:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # Resolve the token + ci_repo. Env vars win over the config
-        # file (12-factor / CI override); config file wins over the
-        # hardcoded default. Config is constructed lazily here so the
-        # collector can still be used standalone (tests, scripts).
+        # Token resolution: env > config file > empty.
         if config is None:
             from ..config import Config
             config = Config()
         env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-        env_repo = (os.environ.get("GITHUB_CI_REPO") or "").strip()
         cfg_token = config.get("github", "token") or ""
-        cfg_repo = config.get("github", "ci_repo") or ci_repo
         self._token = env_token or cfg_token
-        self._ci_repo_name = env_repo or cfg_repo
         if not env_token and cfg_token:
             log.info("Loaded GitHub token from %s", config.path)
 
@@ -146,23 +143,27 @@ class GithubCollector:
             self._refresh()
 
     def _refresh(self) -> None:
-        user = self._fetch_user()
-        if user is None:
+        # /user returns the full profile — login, followers count, etc.
+        # One call gives us both `user` and `followers`; no need to
+        # hit /users/{login} separately.
+        me = self._fetch_user_profile()
+        if me is None:
             return  # keep the previous snapshot; no partial updates
+        user = me.get("login")
+        followers = int(me.get("followers", 0) or 0)
 
         stars = self._fetch_total_stars(user)
         commits_today = self._fetch_commits_today(user)
         open_prs = self._fetch_open_prs(user)
-        ci = self._fetch_latest_ci(user)
+        ev = self._fetch_latest_event(user)
 
         snap = GithubSnapshot(
-            user=user, stars=stars, streak=None,
+            user=user, stars=stars, followers=followers,
             commits_today=commits_today, open_prs=open_prs,
-            ci_status=ci[0] if ci else None,
-            ci_workflow=ci[1] if ci else None,
-            ci_repo=ci[2] if ci else None,
-            ci_run_number=ci[3] if ci else None,
-            ci_age_min=ci[4] if ci else None,
+            latest_event_type=ev[0] if ev else None,
+            latest_event_object=ev[1] if ev else None,
+            latest_event_repo=ev[2] if ev else None,
+            latest_event_ts=ev[3] if ev else None,
             ts=time.time(),
         )
         with self._lock:
@@ -188,11 +189,19 @@ class GithubCollector:
 
     # ---- Field fetchers ----
 
-    def _fetch_user(self) -> Optional[str]:
+    def _fetch_user_profile(self) -> Optional[dict]:
+        """Fetch the authenticated user's full profile.
+
+        Returns the raw ``/user`` dict (login, followers, name, …) or
+        ``None`` on error. Callers should pull out the specific fields
+        they need; we don't unpack here so that future fields (e.g.
+        following, public_repos) can be added without touching the
+        fetcher.
+        """
         data = self._get("/user")
         if not isinstance(data, dict):
             return None
-        return data.get("login")
+        return data
 
     def _fetch_total_stars(self, user: str) -> Optional[int]:
         """Sum stargazers_count across the user's own repos. Paginate
@@ -233,27 +242,62 @@ class GithubCollector:
             return None
         return int(data.get("total_count", 0) or 0)
 
-    def _fetch_latest_ci(self, user: str) -> Optional[tuple]:
-        """Latest workflow run on the configured repo (default ``code-bot``).
-        Returns ``(status, workflow_name, repo, run_number, age_minutes)``
-        or ``None`` if there are no runs / the request failed.
+    def _fetch_latest_event(self, user: str) -> Optional[tuple]:
+        """Latest event in the user's activity feed.
 
-        ``status`` is the ``conclusion`` for completed runs, or the
-        ``status`` (queued / in_progress) for in-flight runs.
+        Returns ``(type, object, repo_short, unix_ts)`` or ``None`` if
+        the feed is empty / the request failed. The page renders these
+        into a one-liner like "Push main 2 min ago".
+
+        The ``object`` is the most identifying piece of the event
+        payload — a branch name for Push/Create/Delete, the first
+        commit's message for PushEvent (when ref is empty), a PR/issue
+        title (truncated) for the corresponding events, etc.
         """
-        path = f"/repos/{user}/{self._ci_repo_name}/actions/runs?per_page=1"
+        path = f"/users/{user}/events?per_page=1"
         data = self._get(path)
-        if not isinstance(data, dict):
+        if not isinstance(data, list) or not data:
             return None
-        runs = data.get("workflow_runs", [])
-        if not runs:
-            return None
-        r = runs[0]
-        gh_status = r.get("status")
-        conclusion = r.get("conclusion")
-        combined = conclusion if gh_status == "completed" else gh_status
-        wf = (r.get("name") or "").strip() or "ci"
-        repo = f"{user}/{self._ci_repo_name}"
-        run_num = r.get("run_number")
-        age_min = _age_minutes(r.get("created_at"))
-        return (combined, wf, repo, run_num, age_min)
+        e = data[0]
+        ev_type = e.get("type") or ""
+        payload = e.get("payload") or {}
+        repo_full = (e.get("repo") or {}).get("name") or ""
+        repo_short = repo_full.split("/", 1)[-1] if "/" in repo_full else repo_full
+        return (ev_type, _event_object(ev_type, payload),
+                repo_short, _event_unix_ts(e.get("created_at")))
+
+
+def _event_object(ev_type: str, p: dict) -> str:
+    """Pick the most identifying short string from an event payload."""
+    if ev_type == "PushEvent":
+        # Prefer the branch name (e.g. "main"); fall back to first commit.
+        ref = (p.get("ref") or "").split("/")[-1]
+        if ref:
+            return ref
+        commits = p.get("commits") or []
+        if commits:
+            return (commits[0].get("message") or "push").split("\n", 1)[0][:10]
+        return "push"
+    if ev_type == "CreateEvent":
+        ref_type = p.get("ref_type") or "branch"
+        ref = p.get("ref") or ""
+        if ref_type == "repository":
+            return "repo"
+        return ref or ref_type
+    if ev_type == "DeleteEvent":
+        return p.get("ref") or "branch"
+    if ev_type == "PullRequestEvent":
+        title = ((p.get("pull_request") or {}).get("title") or "PR")
+        return title[:12]
+    if ev_type == "IssuesEvent":
+        title = ((p.get("issue") or {}).get("title") or "issue")
+        return title[:12]
+    if ev_type == "WatchEvent":
+        return "star"
+    if ev_type == "ForkEvent":
+        return ((p.get("forkee") or {}).get("name") or "fork")[:12]
+    if ev_type == "ReleaseEvent":
+        return ((p.get("release") or {}).get("tag_name") or "tag")[:12]
+    if ev_type == "PublicEvent":
+        return "public"
+    return ev_type.replace("Event", "").lower()[:12]

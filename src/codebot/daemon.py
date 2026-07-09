@@ -66,7 +66,8 @@ class Daemon:
         self._stop = threading.Event()
         self._canvas = Canvas()
         self._pages = make_pages()
-        self._current_page = 0
+        # 临时: 启动后默认显示 GitHub 页面 (index=2). 改回 0 恢复 SystemPage.
+        self._current_page = 2
         self._sys_collector = SystemCollector(hz=2.0)
         # Load (and create if missing) the per-user config file. The
         # collector uses it for the GitHub token; future subsystems can
@@ -82,7 +83,7 @@ class Daemon:
             if isinstance(p, SystemPage):
                 p._collector = self._sys_collector
             elif isinstance(p, GithubPage):
-                p._gh_collector = self._gh_collector
+                p._collector = self._gh_collector
         self._actions_page: Optional[CustomActionsPage] = None
         self._custom_subpage = 0
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源

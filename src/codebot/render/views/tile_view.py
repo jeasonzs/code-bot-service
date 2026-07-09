@@ -79,10 +79,14 @@ class TileView:
     title: str = ""
     title_color: Color = VSCodeDark.FG
 
-    value_digits: str = ""      # big DSEG digits, e.g. "23" or "2.8"
+    value_digits: str = ""      # big digits, e.g. "23" or "2.8" or "—"
     value_unit: str = ""        # small bold suffix, e.g. "%" / "GHz" / "°C" / ""
     value_color: Color = VSCodeDark.FG
     unit_color: Color = VSCodeDark.FG
+    # Font for the digits row. Default is the 7-seg DSEG font (digits
+    # + a few symbols). For non-numeric placeholders like "—" (which
+    # DSEG doesn't have), use "bold" to get a real em-dash render.
+    value_font: str = "digital"
 
     bar_pct: Optional[float] = None  # 0-100; None hides the bar
     bar_color: Color = VSCodeDark.FG
@@ -107,7 +111,7 @@ class TileView:
 
         # Big value (right-aligned, with optional unit suffix).
         if self.value_digits:
-            digits_font = get_font("digital", self.value_font_size)
+            digits_font = get_font(self.value_font, self.value_font_size)
             unit_font = get_font("bold", self.unit_font_size)
             x_right = self.x + self.w - self.pad
             # Cap digits width so the unit always has room (and we can fall

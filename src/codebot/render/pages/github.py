@@ -14,6 +14,7 @@ thread, refreshed every 60s).
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from PIL import ImageDraw
@@ -38,66 +39,94 @@ CELL_W = SCREEN_W // 2  # 160
 # ---- Formatting helpers ----
 
 def _fmt_stars(n: Optional[int]) -> tuple[str, str]:
-    """Format star count as (digits, unit). Unit is 'k' if >= 1000."""
+    """Format star count as (digits, unit). Unit is 'k' if >= 1000.
+
+    DSEG (the 7-seg font used for digits) has a decimal point, but it's
+    only 6×5 px and easy to misread at 1.47". We always round to an
+    integer k to keep the row clean. < 1000 is shown as the raw count.
+
+    Missing values render as ``"0"`` so the page looks "ready" at
+    startup (before the first refresh) instead of placeholder boxes.
+    """
     if n is None:
-        return "—", ""
+        return "0", ""
     if n < 1000:
         return str(n), ""
-    k = n / 1000.0
-    if k < 10:
-        return "{0:.1f}".format(k), "k"
+    k = round(n / 1000.0)
     return "{0:.0f}".format(k), "k"
 
 
 def _fmt_int(n: Optional[int]) -> str:
-    return "—" if n is None else str(n)
+    """Format a count for the value row. ``None`` → ``"0"`` (not "—")
+    so the page reads as ready/zero at startup, not as a broken
+    placeholder box."""
+    return "0" if n is None else str(n)
 
 
-# ---- CI footer ----
+# ---- Event footer ----
 
-# Map GitHub status/conclusion → text color used in the footer item.
-_CI_COLORS = {
-    "success":         VSCodeDark.SUCCESS,
-    "failure":         VSCodeDark.DANGER,
-    "timed_out":       VSCodeDark.DANGER,
-    "in_progress":     VSCodeDark.INFO,
-    "queued":          VSCodeDark.FG_DIM,
-    "action_required": VSCodeDark.WARNING,
-    "cancelled":       VSCodeDark.FG_DIM,
-    "neutral":         VSCodeDark.FG_DIM,
-    "skipped":         VSCodeDark.FG_DIM,
+# Map GitHub event type → short verb shown in the footer.
+_EVENT_VERB = {
+    "PushEvent":         "Push",
+    "CreateEvent":       "Create",
+    "DeleteEvent":       "Del",
+    "PullRequestEvent":  "PR",
+    "IssuesEvent":       "Issue",
+    "WatchEvent":        "Star",
+    "ForkEvent":         "Fork",
+    "ReleaseEvent":      "Rel",
+    "PublicEvent":       "Public",
+    "MemberEvent":       "Member",
+    "GollumEvent":       "Wiki",
 }
-_DEFAULT_CI_COLOR = VSCodeDark.FG_DIM
-
-# Status word rendered as the footer value. Keep short — the footer
-# row is only ~280px wide and the workflow name follows.
-_CI_LABEL = {
-    "success":         "ok",
-    "failure":         "fail",
-    "timed_out":       "fail",
-    "in_progress":     "run",
-    "queued":          "wait",
-    "action_required": "req",
-    "cancelled":       "cncl",
-    "neutral":         "skip",
-    "skipped":         "skip",
-}
-_DEFAULT_CI_LABEL = "ci"
+_DEFAULT_EVENT_VERB = "Event"
 
 
-def _ci_footer_item(snap: Optional[GithubSnapshot]) -> dict:
-    """Build a FooterView item dict for the latest CI run."""
-    if snap is None or snap.ci_status is None:
-        return {"icon": "status", "value": "—", "color": VSCodeDark.FG_DIM}
+def _fmt_age(ts: Optional[float]) -> str:
+    """Format a unix-timestamp as a short relative time ('2 min ago',
+    '3 hr ago', '4 day ago'). Renders '—' for None or future ts."""
+    if ts is None:
+        return "—"
+    s = int(time.time() - ts)
+    if s < 0:
+        return "now"
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60} min ago"
+    if s < 86400:
+        return f"{s // 3600} hr ago"
+    if s < 86400 * 7:
+        return f"{s // 86400} day ago"
+    return f"{s // 86400} d ago"
 
-    color = _CI_COLORS.get(snap.ci_status, _DEFAULT_CI_COLOR)
-    label = _CI_LABEL.get(snap.ci_status, _DEFAULT_CI_LABEL)
-    wf = (snap.ci_workflow or "ci").split(" ")[0][:8]  # trim long names
-    if snap.ci_run_number is not None:
-        value = f"{label} #{snap.ci_run_number} {wf}"
-    else:
-        value = f"{label} {wf}"
-    return {"icon": "status", "value": value, "color": color}
+
+def _event_footer_item(snap: Optional[GithubSnapshot]) -> dict:
+    """Build a FooterView item dict for the user's latest GitHub event.
+
+    Renders as ``Push main 2 min ago`` etc. — verb (colored by type) +
+    object (branch / title / etc.) + relative age.
+    """
+    if snap is None or snap.latest_event_type is None:
+        return {"icon": "context", "value": "—", "color": VSCodeDark.FG_DIM}
+
+    verb = _EVENT_VERB.get(snap.latest_event_type, _DEFAULT_EVENT_VERB)
+    obj = snap.latest_event_object or "—"
+    # Trim object to keep the row short enough to fit (~280px).
+    obj = obj[:12]
+    age = _fmt_age(snap.latest_event_ts)
+
+    # Color by event type so the eye can pick it out at a glance.
+    color = {
+        "PushEvent":        VSCodeDark.SUCCESS,
+        "CreateEvent":      VSCodeDark.INFO,
+        "PullRequestEvent": VSCodeDark.SYN_FUNC,
+        "WatchEvent":       VSCodeDark.WARNING,
+        "ForkEvent":        VSCodeDark.WARNING,
+        "ReleaseEvent":     VSCodeDark.WARNING,
+    }.get(snap.latest_event_type, VSCodeDark.FG_DIM)
+
+    return {"icon": "context", "value": f"{verb} {obj} {age}", "color": color}
 
 
 class GithubPage(BasePage):
@@ -110,14 +139,38 @@ class GithubPage(BasePage):
 
     def __init__(self, collector: Optional[GithubCollector] = None) -> None:
         self._collector = collector
+        # Track the last snap we printed so the daemon log doesn't
+        # spam once per render frame. None means "haven't printed yet".
+        self._last_snap_dump: Optional[tuple] = None
 
     def render(self, canvas: Canvas) -> None:
         snap = self._collector.snapshot() if self._collector is not None else None
+        self._dump_snap(snap)
         canvas.fill(VSCodeDark.BG)
 
         self._draw_dividers(canvas)
         self._draw_tiles(canvas, snap)
         self._draw_footer(canvas, snap)
+
+    def _dump_snap(self, snap: Optional[GithubSnapshot]) -> None:
+        """Print ``snap`` to stdout, but only when it changes.
+
+        The page renders at 8 fps in sim mode, so an unconditional
+        print would flood the log. We hash the interesting fields and
+        print on first call + on every subsequent change.
+        """
+        if snap is None:
+            key = ("__none__",)
+        else:
+            key = (snap.user, snap.stars, snap.followers,
+                   snap.commits_today, snap.open_prs,
+                   snap.latest_event_type, snap.latest_event_object,
+                   snap.latest_event_repo, snap.latest_event_ts)
+        if key == self._last_snap_dump:
+            return
+        self._last_snap_dump = key
+        # Use the dataclass repr so the field order matches the source.
+        print(f"[GithubPage] snap = {snap!r}")
 
     # ---- Sections ----
 
@@ -154,12 +207,15 @@ class GithubPage(BasePage):
             bar_pct=bar_pct, bar_color=VSCodeDark.WARNING,
         ).draw(canvas)
 
-        # ---- STREAK (top-right): always "—" (per user decision) ----
+        # ---- FOLLOWERS (top-right): count of people following the user ----
+        # Reuses the "streak" bitmap (flame) as a stand-in for "heat /
+        # popularity"; we don't have a dedicated people icon yet.
         TileView(
             x=CELL_W, y=ROW1_Y, w=CELL_W, h=ROW_H,
             icon="streak", icon_color=VSCodeDark.INFO,
-            title="STREAK", title_color=VSCodeDark.INFO,
-            value_digits="—", value_unit="",
+            title="Follow", title_color=VSCodeDark.INFO,
+            value_digits=_fmt_int(snap.followers if snap else None),
+            value_unit="",
         ).draw(canvas)
 
         # ---- COMMITS (bottom-left): today's commit count + unit "Today" ----
@@ -184,5 +240,5 @@ class GithubPage(BasePage):
     def _draw_footer(canvas: Canvas, snap: Optional[GithubSnapshot]) -> None:
         FooterView(
             y=FOOTER_Y,
-            items=[_ci_footer_item(snap)],
+            items=[_event_footer_item(snap)],
         ).draw(canvas)
