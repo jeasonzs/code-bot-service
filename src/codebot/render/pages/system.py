@@ -11,7 +11,6 @@ Consumes data from SystemCollector (2 Hz background thread) — no own psutil.
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from PIL import ImageDraw
@@ -22,25 +21,22 @@ from ..icons import draw_icon
 from ..theme import VSCodeDark, SCREEN_W, SCREEN_H
 from ..widgets import (
     draw_dotted_bar,
+    draw_text_centered,
     draw_text_right,
     get_font,
 )
 from .base import BasePage
 
 
-# Layout constants for the 2x2 dashboard.
-# (No top page-indicator bar — SystemPage sets skip_chrome=True.)
-HEADER_Y = 0
-HEADER_H = 22                  # y=0..21
-
-ROW1_Y = 22                    # CPU | MEM top edge
-ROW2_Y = 94                    # NET | FREQ top edge
+# Layout constants for the 2x2 dashboard (full-screen, no top header).
+ROW1_Y = 0                     # CPU | MEM top edge
+ROW2_Y = 72                    # NET | FREQ top edge
 ROW_H = 72                     # body row height
 FOOTER_Y = 148                 # footer baseline (icon y)
 
 CELL_W = SCREEN_W // 2         # 160
 TILE_PAD = 8                   # left/right inner padding
-ICON_SIZE = 32                 # tile icons
+ICON_SIZE = 40                 # tile icons
 FOOTER_ICON_SIZE = 12
 
 
@@ -52,10 +48,10 @@ def _fmt_rate(kbs: float) -> str:
 
 
 def _fmt_freq(mhz: float) -> str:
-    """Format CPU frequency: '2.83' or '—' if unavailable."""
+    """Format CPU frequency: '2.8' (1 decimal) or '—' if unavailable."""
     if mhz <= 0:
         return "—"
-    return f"{mhz / 1000:.2f}"
+    return "{0:.1f}".format(mhz / 1000)
 
 
 def _draw_big_number(
@@ -68,23 +64,21 @@ def _draw_big_number(
 
     # Special case: DSEG digit font doesn't have '%' (or '.', '/', etc.).
     # If the text ends with a non-DSEG suffix (commonly '%'), render the
-    # digit part in the main font and the suffix in bold, right-aligned.
+    # digit part in the main font and the suffix in bold at font 12
+    # (matching the GHz unit size used in FREQ tile).
     if text.endswith("%") and font.size >= 24:
         digits = text[:-1]
         suffix = "%"
-        suffix_font = get_font("bold", max(12, font.size * 2 // 3))
+        suffix_font = get_font("bold", 12)
         bw_d = draw.textbbox((0, 0), digits, font=font)
         w_d = bw_d[2] - bw_d[0]
         bw_s = draw.textbbox((0, 0), suffix, font=suffix_font)
         w_s = bw_s[2] - bw_s[0]
         gap = 2
-        # Right-align: % ends at x_right; digits end at x_right - w_s - gap
         x_suffix = x_right - w_s
         x_digits_right = x_suffix - gap
-        # Vertically align bottoms of the two fonts
         y_suffix = y + (font.size - suffix_font.size)
         if w_d + w_s + gap > max_width:
-            # Overflow: fall back to bold for the whole thing
             small = get_font("bold", max(12, font.size - 8))
             draw_text_right(canvas, text, x_right, y, small, color)
             return
@@ -118,192 +112,189 @@ class SystemPage(BasePage):
         snap = self._collector.snapshot()
         canvas.fill(VSCodeDark.BG)
 
-        # ---- Header (y=0-21) ----
-        draw_icon(canvas, "terminal", 4, HEADER_Y, VSCodeDark.INFO, size=14)
-        d = ImageDraw.Draw(canvas.image)
-        d.text(
-            (22, HEADER_Y), "CODEBOT",
-            fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b),
-            font=get_font("bold", 16),
-        )
-        draw_text_right(
-            canvas, time.strftime("%H:%M"),
-            SCREEN_W - 4, HEADER_Y + 1,
-            get_font("bold", 18), VSCodeDark.FG_DIM,
-        )
-
         if snap is None:
             # First sample not ready; show minimal layout
             return
 
-        # ---- CPU cell (x=0..159, y=26..98) ----
+        d = ImageDraw.Draw(canvas.image)
+        # ---- Cell dividers (drawn behind content) ----
+        border = (VSCodeDark.BORDER.r, VSCodeDark.BORDER.g, VSCodeDark.BORDER.b)
+        # Vertical: between columns (left tiles vs right tiles)
+        d.line(
+            [(SCREEN_W // 2, ROW1_Y), (SCREEN_W // 2, ROW2_Y + ROW_H)],
+            fill=border, width=1,
+        )
+        # Horizontal: between row1 and row2
+        d.line(
+            [(0, ROW2_Y), (SCREEN_W, ROW2_Y)],
+            fill=border, width=1,
+        )
+        # Horizontal: between row2 and footer
+        d.line(
+            [(0, ROW2_Y + ROW_H), (SCREEN_W, ROW2_Y + ROW_H)],
+            fill=border, width=1,
+        )
+
+        # ---- CPU cell (x=0..159, y=0..72) ----
         self._draw_cpu_tile(canvas, snap.cpu_pct)
 
         # ---- MEM cell (x=160..319) ----
         self._draw_mem_tile(canvas, snap.mem_pct)
 
-        # ---- NET cell (x=0..159, y=99..146) ----
-        self._draw_net_tile(canvas, snap.rx_rate_kbs, snap.tx_rate_kbs)
+        # ---- TEMP cell (x=0..159, y=72..144) ----
+        self._draw_temp_tile(canvas, snap.cpu_temp_c)
 
         # ---- FREQ cell (x=160..319) ----
         self._draw_freq_tile(canvas, snap.cpu_freq_mhz)
 
-        # ---- Footer (y=152..168) ----
-        self._draw_footer(canvas, snap.cpu_temp_c, snap.fan_rpm, snap.disk_pct)
+        # ---- Footer (y=148..172) ----
+        self._draw_footer(canvas, snap.rx_rate_kbs, snap.tx_rate_kbs, snap.disk_pct)
 
     # ---- Per-tile helpers ----
 
     def _draw_cpu_tile(self, canvas: Canvas, cpu_pct: float) -> None:
         x_cell = 0
+        icon_x = x_cell + TILE_PAD
         y_icon = ROW1_Y + 6
-        draw_icon(canvas, "cpu", x_cell + TILE_PAD, y_icon, VSCodeDark.INFO, size=ICON_SIZE)
-        # Label + big number on the right
-        draw_text_right(
-            canvas, "CPU",
-            x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
-            get_font("bold", 12), VSCodeDark.INFO,
-        )
+        draw_icon(canvas, "cpu", icon_x, y_icon, VSCodeDark.INFO, size=ICON_SIZE)
+        # Big number on the right
         _draw_big_number(
-            canvas, f"{cpu_pct:.0f}%",
-            x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
+            canvas, "{0:.0f}%".format(cpu_pct),
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 10,
             get_font("digital", 36), VSCodeDark.FG, max_width=100,
         )
-        # Dotted bar at the bottom of the cell
+        # Title centered below icon
+        title_font = get_font("bold", 11)
+        d = ImageDraw.Draw(canvas.image)
+        bbox_t = d.textbbox((0, 0), "CPU", font=title_font)
+        title_w = bbox_t[2] - bbox_t[0]
+        icon_cx = icon_x + ICON_SIZE // 2
+        title_left = icon_cx - title_w // 2
+        draw_text_centered(
+            canvas, "CPU",
+            icon_cx, ROW1_Y + 48,
+            title_font, VSCodeDark.INFO,
+        )
+        # Dotted bar: left edge starts just past the icon's right edge
+        bar_x_start = icon_x + ICON_SIZE + 4
+        bar_x_end = x_cell + CELL_W - TILE_PAD
         draw_dotted_bar(
             canvas,
-            x_cell + TILE_PAD, ROW1_Y + ROW_H - 8,
-            CELL_W - 2 * TILE_PAD, 4,
+            bar_x_start, ROW1_Y + ROW_H - 8,
+            bar_x_end - bar_x_start, 4,
             cpu_pct, fg=VSCodeDark.INFO, n_segments=14, gap=1,
         )
 
     def _draw_mem_tile(self, canvas: Canvas, mem_pct: float) -> None:
         x_cell = CELL_W
+        icon_x = x_cell + TILE_PAD
         y_icon = ROW1_Y + 6
-        draw_icon(canvas, "mem", x_cell + TILE_PAD, y_icon, VSCodeDark.MEM_ACCENT, size=ICON_SIZE)
-        draw_text_right(
-            canvas, "MEM",
-            x_cell + CELL_W - TILE_PAD, ROW1_Y + 2,
-            get_font("bold", 12), VSCodeDark.MEM_ACCENT,
-        )
+        draw_icon(canvas, "mem", icon_x, y_icon, VSCodeDark.MEM_ACCENT, size=ICON_SIZE)
         _draw_big_number(
-            canvas, f"{mem_pct:.0f}%",
-            x_cell + CELL_W - TILE_PAD, ROW1_Y + 16,
+            canvas, "{0:.0f}%".format(mem_pct),
+            x_cell + CELL_W - TILE_PAD, ROW1_Y + 10,
             get_font("digital", 36), VSCodeDark.FG, max_width=100,
         )
+        title_font = get_font("bold", 11)
+        d = ImageDraw.Draw(canvas.image)
+        bbox_t = d.textbbox((0, 0), "MEM", font=title_font)
+        title_w = bbox_t[2] - bbox_t[0]
+        icon_cx = icon_x + ICON_SIZE // 2
+        title_left = icon_cx - title_w // 2
+        draw_text_centered(
+            canvas, "MEM",
+            icon_cx, ROW1_Y + 48,
+            title_font, VSCodeDark.MEM_ACCENT,
+        )
+        # Dotted bar: left edge starts just past the icon's right edge
+        bar_x_start = icon_x + ICON_SIZE + 4
+        bar_x_end = x_cell + CELL_W - TILE_PAD
         draw_dotted_bar(
             canvas,
-            x_cell + TILE_PAD, ROW1_Y + ROW_H - 8,
-            CELL_W - 2 * TILE_PAD, 4,
+            bar_x_start, ROW1_Y + ROW_H - 8,
+            bar_x_end - bar_x_start, 4,
             mem_pct, fg=VSCodeDark.MEM_ACCENT, n_segments=14, gap=1,
         )
 
-    def _draw_net_tile(self, canvas: Canvas, rx_kbs: float, tx_kbs: float) -> None:
+    def _draw_temp_tile(self, canvas: Canvas, cpu_temp_c: Optional[float]) -> None:
         x_cell = 0
-        y_icon = ROW2_Y + 8           # 107
-        draw_icon(
-            canvas, "net",
-            x_cell + TILE_PAD, y_icon,
-            VSCodeDark.NET_UP, size=ICON_SIZE, color2=VSCodeDark.NET_DOWN,
-        )
-        # Label: top-left, just right of the icon
+        icon_x = x_cell + TILE_PAD
+        y_icon = ROW2_Y + 6
+        draw_icon(canvas, "temp", icon_x, y_icon, VSCodeDark.NET_UP, size=ICON_SIZE)
+        # Big value: "42" in DSEG, "°C" in bold to the right
         d = ImageDraw.Draw(canvas.image)
-        label_x = x_cell + TILE_PAD + ICON_SIZE + 6
-        d.text(
-            (label_x, ROW2_Y + 0), "NET",
-            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
-            font=get_font("bold", 11),
-        )
-
-        # Auto-unit: MB/s if either side >= 1024 KB/s
-        use_mb = rx_kbs >= 1024 or tx_kbs >= 1024
-        if use_mb:
-            up_str = f"↑{rx_kbs / 1024:.1f}"
-            down_str = f"↓{tx_kbs / 1024:.1f}"
-            unit = "MB/s"
+        if cpu_temp_c is not None:
+            num = "{0:.0f}".format(cpu_temp_c)
+            unit = "\xb0C"
         else:
-            up_str = f"↑{rx_kbs:.0f}"
-            down_str = f"↓{tx_kbs:.0f}"
-            unit = "KB/s"
-
-        # Two stacked value pairs (up | down) with a vertical divider
-        text_x_start = label_x
-        cell_right = x_cell + CELL_W - TILE_PAD
-        cell_mid = (text_x_start + cell_right) // 2
-
-        font_num = get_font("bold", 18)
-        font_unit = get_font("bold", 9)
-        y_num = ROW2_Y + 14
-        y_unit = ROW2_Y + 34
-
-        # Up (left of divider)
-        d.text(
-            (text_x_start, y_num), up_str,
-            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
-            font=font_num,
-        )
-        d.text(
-            (text_x_start, y_unit), unit,
-            fill=(VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b),
-            font=font_unit,
-        )
-        # Down (right of divider)
-        d.text(
-            (cell_mid + 4, y_num), down_str,
-            fill=(VSCodeDark.NET_DOWN.r, VSCodeDark.NET_DOWN.g, VSCodeDark.NET_DOWN.b),
-            font=font_num,
-        )
-        d.text(
-            (cell_mid + 4, y_unit), unit,
-            fill=(VSCodeDark.NET_DOWN.r, VSCodeDark.NET_DOWN.g, VSCodeDark.NET_DOWN.b),
-            font=font_unit,
-        )
-        # Vertical divider
-        d.line(
-            [(cell_mid, ROW2_Y + 4), (cell_mid, ROW2_Y + ROW_H - 4)],
-            fill=(VSCodeDark.BORDER.r, VSCodeDark.BORDER.g, VSCodeDark.BORDER.b),
-            width=1,
+            num = "—"
+            unit = ""
+        font_d = get_font("digital", 36)
+        font_u = get_font("bold", 12)
+        x_right = x_cell + CELL_W - TILE_PAD
+        if unit:
+            bbox_u = d.textbbox((0, 0), unit, font=font_u)
+            w_u = bbox_u[2] - bbox_u[0]
+            y_unit = ROW2_Y + 10 + (36 - 12)
+            draw_text_right(canvas, unit, x_right, y_unit, font_u, VSCodeDark.FG)
+            x_num_right = x_right - w_u - 4
+        else:
+            x_num_right = x_right
+        draw_text_right(canvas, num, x_num_right, ROW2_Y + 10, font_d, VSCodeDark.FG)
+        # Title centered below icon
+        draw_text_centered(
+            canvas, "TEMP",
+            icon_x + ICON_SIZE // 2, ROW2_Y + 48,
+            get_font("bold", 11), VSCodeDark.NET_UP,
         )
 
     def _draw_freq_tile(self, canvas: Canvas, freq_mhz: float) -> None:
         x_cell = CELL_W
-        y_icon = ROW2_Y + 14
-        draw_icon(canvas, "freq", x_cell + TILE_PAD, y_icon, VSCodeDark.FREQ_ACCENT, size=ICON_SIZE)
-        draw_text_right(
-            canvas, "FREQ",
-            x_cell + CELL_W - TILE_PAD, ROW2_Y + 2,
-            get_font("bold", 12), VSCodeDark.FREQ_ACCENT,
-        )
-        # "2.83 GHz"
+        icon_x = x_cell + TILE_PAD
+        y_icon = ROW2_Y + 6
+        draw_icon(canvas, "freq", icon_x, y_icon, VSCodeDark.FREQ_ACCENT, size=ICON_SIZE)
         freq_str = _fmt_freq(freq_mhz)
-        draw_text_right(
-            canvas, freq_str,
-            x_cell + CELL_W - TILE_PAD - 26, ROW2_Y + 18,
-            get_font("digital", 28), VSCodeDark.FG,
-        )
-        # "GHz" small label to the right of the number
-        draw_text_right(
-            canvas, "GHz",
-            x_cell + CELL_W - TILE_PAD, ROW2_Y + 28,
-            get_font("bold", 12), VSCodeDark.FG_DIM,
+        font_d = get_font("digital", 36)
+        font_u = get_font("bold", 12)
+        d = ImageDraw.Draw(canvas.image)
+        bbox_u = d.textbbox((0, 0), "GHz", font=font_u)
+        w_u = bbox_u[2] - bbox_u[0]
+        x_right = x_cell + CELL_W - TILE_PAD
+        x_unit = x_right
+        x_num_right = x_unit - w_u - 4
+        y_unit = ROW2_Y + 10 + (36 - 12)
+        draw_text_right(canvas, freq_str, x_num_right, ROW2_Y + 10, font_d, VSCodeDark.FG)
+        draw_text_right(canvas, "GHz", x_unit, y_unit, font_u, VSCodeDark.FG_DIM)
+        # Title centered below icon
+        draw_text_centered(
+            canvas, "FREQ",
+            icon_x + ICON_SIZE // 2, ROW2_Y + 48,
+            get_font("bold", 11), VSCodeDark.FREQ_ACCENT,
         )
 
     def _draw_footer(
         self, canvas: Canvas,
-        cpu_temp_c: Optional[float], fan_rpm: Optional[int], disk_pct: float,
+        rx_rate_kbs: float, tx_rate_kbs: float, disk_pct: float,
     ) -> None:
         d = ImageDraw.Draw(canvas.image)
         dim = (VSCodeDark.FG_DIM.r, VSCodeDark.FG_DIM.g, VSCodeDark.FG_DIM.b)
+        up_color = (VSCodeDark.NET_UP.r, VSCodeDark.NET_UP.g, VSCodeDark.NET_UP.b)
+        down_color = (VSCodeDark.NET_DOWN.r, VSCodeDark.NET_DOWN.g, VSCodeDark.NET_DOWN.b)
         font = get_font("bold", 11)
-        # `>_` prompt
+
+        def fmt_rate(kbs):
+            if kbs >= 1024:
+                return "{0:.1f}MB/s".format(kbs / 1024)
+            return "{0:.0f}KB/s".format(kbs)
+
+        # `>_` prompt (leftmost)
         draw_icon(canvas, "terminal", 4, FOOTER_Y, VSCodeDark.INFO, size=FOOTER_ICON_SIZE)
-        # thermo
-        draw_icon(canvas, "thermo", 60, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
-        temp_text = f"{cpu_temp_c:.0f}°C" if cpu_temp_c is not None else "—"
-        d.text((74, FOOTER_Y + 1), temp_text, fill=dim, font=font)
-        # fan
-        draw_icon(canvas, "fan", 140, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
-        fan_text = f"{fan_rpm} RPM" if fan_rpm is not None else "—"
-        d.text((154, FOOTER_Y + 1), fan_text, fill=dim, font=font)
-        # disk
-        draw_icon(canvas, "disk", 220, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
-        d.text((234, FOOTER_Y + 1), f"{disk_pct:.0f}%", fill=dim, font=font)
+        # Slot 1: up arrow + upload rate (green)
+        draw_icon(canvas, "up", 32, FOOTER_Y, VSCodeDark.NET_UP, size=FOOTER_ICON_SIZE)
+        d.text((46, FOOTER_Y + 1), fmt_rate(tx_rate_kbs), fill=up_color, font=font)
+        # Slot 2: down arrow + download rate (cyan)
+        draw_icon(canvas, "down", 122, FOOTER_Y, VSCodeDark.NET_DOWN, size=FOOTER_ICON_SIZE)
+        d.text((136, FOOTER_Y + 1), fmt_rate(rx_rate_kbs), fill=down_color, font=font)
+        # Slot 3: disk + usage %
+        draw_icon(canvas, "disk", 212, FOOTER_Y, VSCodeDark.FG_DIM, size=FOOTER_ICON_SIZE)
+        d.text((226, FOOTER_Y + 1), "{0:.0f}%".format(disk_pct), fill=dim, font=font)

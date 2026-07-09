@@ -1,19 +1,57 @@
-"""PIL-primitive icon renderer for the SystemPage 2x2 dashboard.
+"""Icon renderer for the SystemPage dashboard.
 
-All icons are drawn as geometry (lines, rects, polygons, ellipses) so the
-LCD needs no external font/icon assets. Each icon takes a `size` param;
-same code path works for 32px tile icons and 12px footer icons.
+Two backends:
+  - **Bitmap** icons: PNGs with alpha channel, loaded from
+    `<repo>/code-bot-service/icons/<name>.png`. Original colors preserved
+    (the `color` arg is ignored for bitmaps).
+  - **PIL-primitive** icons: drawn from geometry (lines/rects/polygons).
+    Used for icons we don't have bitmaps for: `terminal` (text `>_`),
+    `fan`, `net` (composite of two stacked arrows via primitive — bitmaps
+    `up` and `down` are used separately in SystemPage).
 
-Kinds: "cpu", "mem", "net", "freq", "terminal", "thermo", "fan", "disk".
+Kinds backed by bitmaps: cpu, mem, freq, temp, up, down, disk, stars,
+streak, commits, prs, status, context.
+Kinds backed by primitives: terminal, fan.
 """
 
 from __future__ import annotations
 
-from PIL import ImageDraw
+from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 from .canvas import Canvas
 from .theme import Color
 from .widgets import get_font
+
+
+# Project icons directory (sibling of fonts/).
+_ICONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "icons"
+
+# Cache: name -> PIL Image (the original 50x50 RGBA source).
+_bitmap_cache: dict[str, Image.Image] = {}
+
+
+def _load_bitmap(name: str) -> Image.Image:
+    """Load a bitmap icon from icons/<name>.png (cached)."""
+    if name not in _bitmap_cache:
+        path = _ICONS_DIR / (name + ".png")
+        _bitmap_cache[name] = Image.open(path).convert("RGBA")
+    return _bitmap_cache[name]
+
+
+def _draw_bitmap(
+    canvas: Canvas, name: str, x: int, y: int, size: int,
+) -> None:
+    """Composite a bitmap icon at (x, y) resized to size×size with alpha.
+
+    Uses `paste` with the alpha channel as mask, so it works on RGB
+    (Canvas.image) without needing a full RGBA conversion.
+    """
+    img = _load_bitmap(name)
+    if img.size != (size, size):
+        img = img.resize((size, size), Image.LANCZOS)
+    canvas.image.paste(img, (x, y), img)
 
 
 def _rgb(color: Color) -> tuple[int, int, int]:
@@ -75,46 +113,85 @@ def _draw_net(
     d: ImageDraw.ImageDraw, x: int, y: int, n: int,
     color_up: Color, color_down: Color,
 ) -> None:
-    """Stacked up/down arrows with shafts (proper arrow shape, not just triangles).
+    """Two close, long offset arrows: up top-left, down bottom-right.
 
-    Top half: up arrow — triangle head on top, rectangular shaft below.
-    Bottom half: down arrow — shaft on top, triangle head pointing down.
+    Each arrow is a vertical line with a chevron tip made of 2 line segments
+    (NOT a filled triangle). Arrows are close together (~30% / 70% of width)
+    and use the full icon height. Both share the same color (color_up).
+    The `color_down` arg is accepted for API compatibility but unused.
     """
-    rgb_up = _rgb(color_up)
-    rgb_down = _rgb(color_down)
-    half = n // 2
+    rgb = _rgb(color_up)
 
-    # Geometry within each half (height = half):
-    #   head 60%, shaft 40%
-    head_h = max(4, half * 3 // 5)
-    shaft_h = half - head_h
-    head_half_w = max(3, n // 3)   # arrowhead half-width
-    shaft_w = max(2, n // 5)       # shaft width (centered)
-    cx = x + n // 2
-    shaft_x0 = cx - shaft_w // 2
-    shaft_x1 = shaft_x0 + shaft_w - 1
+    # Layout: each arrow = chevron (top/bottom) + shaft
+    chevron_h = max(3, n * 12 // 100)         # tip height
+    arrow_h = n // 2                           # each arrow uses half the icon
+    shaft_h = arrow_h - chevron_h              # rest is shaft
+    shaft_w = max(2, n * 6 // 100)             # thin shaft
+    chevron_half_w = max(3, n * 10 // 100)     # chevron half-width
 
-    # ---- Up arrow (top half): head apex at y, base at y+head_h-1; shaft below ----
-    head_apex_y = y
-    head_base_y = y + head_h - 1
-    d.polygon(
-        [(cx, head_apex_y), (cx - head_half_w, head_base_y), (cx + head_half_w, head_base_y)],
-        fill=rgb_up,
+    # Close horizontal positions: ~35% / ~65% of icon width
+    up_cx = x + n * 35 // 100
+    down_cx = x + n * 65 // 100
+
+    # Up arrow: chevron at top (apex up), shaft below
+    up_chevron_top_y = y
+    up_chevron_bot_y = y + chevron_h - 1
+    up_shaft_top_y = y + chevron_h
+    up_shaft_bot_y = y + arrow_h - 1
+
+    # Down arrow: shaft on top, chevron at bottom (apex down)
+    down_shaft_top_y = y + arrow_h
+    down_shaft_bot_y = down_shaft_top_y + shaft_h - 1
+    down_chevron_top_y = down_shaft_bot_y + 1
+    down_chevron_bot_y = y + n - 1
+
+    # ---- Up arrow chevron ("^" — 2 line segments) ----
+    d.line(
+        [
+            (up_cx - chevron_half_w, up_chevron_bot_y),
+            (up_cx, up_chevron_top_y),
+        ],
+        fill=rgb, width=1,
     )
-    shaft_top = head_base_y + 1
-    shaft_bot = shaft_top + shaft_h - 1
-    d.rectangle([(shaft_x0, shaft_top), (shaft_x1, shaft_bot)], fill=rgb_up)
-
-    # ---- Down arrow (bottom half): shaft on top, head apex at y+n-1 ----
-    head_apex_y_d = y + n - 1
-    head_base_y_d = head_apex_y_d - head_h + 1
-    d.polygon(
-        [(cx, head_apex_y_d), (cx - head_half_w, head_base_y_d), (cx + head_half_w, head_base_y_d)],
-        fill=rgb_down,
+    d.line(
+        [
+            (up_cx, up_chevron_top_y),
+            (up_cx + chevron_half_w, up_chevron_bot_y),
+        ],
+        fill=rgb, width=1,
     )
-    shaft_top_d = y + half
-    shaft_bot_d = head_base_y_d - 1
-    d.rectangle([(shaft_x0, shaft_top_d), (shaft_x1, shaft_bot_d)], fill=rgb_down)
+    # Up arrow shaft
+    d.rectangle(
+        [
+            (up_cx - shaft_w // 2, up_shaft_top_y),
+            (up_cx + shaft_w // 2, up_shaft_bot_y),
+        ],
+        fill=rgb,
+    )
+
+    # ---- Down arrow shaft ----
+    d.rectangle(
+        [
+            (down_cx - shaft_w // 2, down_shaft_top_y),
+            (down_cx + shaft_w // 2, down_shaft_bot_y),
+        ],
+        fill=rgb,
+    )
+    # Down arrow chevron ("v" — 2 line segments)
+    d.line(
+        [
+            (down_cx - chevron_half_w, down_chevron_top_y),
+            (down_cx, down_chevron_bot_y),
+        ],
+        fill=rgb, width=1,
+    )
+    d.line(
+        [
+            (down_cx, down_chevron_bot_y),
+            (down_cx + chevron_half_w, down_chevron_top_y),
+        ],
+        fill=rgb, width=1,
+    )
 
 
 def _draw_freq(d: ImageDraw.ImageDraw, x: int, y: int, n: int, color: Color) -> None:
@@ -215,14 +292,27 @@ def draw_icon(
 ) -> None:
     """Draw an icon at (x, y) on the canvas.
 
+    Bitmap-backed kinds (loaded from icons/<name>.png, original colors
+    preserved, `color` ignored): cpu, mem, freq, temp, up, down, disk,
+    stars, streak, commits, prs, status, context.
+
+    Primitive-backed kinds: terminal, fan, thermo, net.
+
     Args:
         canvas: target Canvas
-        kind: one of "cpu", "mem", "net", "freq", "terminal", "thermo", "fan", "disk"
+        kind: icon name
         x, y: top-left pixel position
-        color: primary color
-        size: icon size in pixels (12 for footer, 32 for tile)
-        color2: optional secondary color; only "net" uses it (down arrow)
+        color: primary color (used by primitive icons; ignored for bitmaps)
+        size: icon size in pixels (12 for footer, 32-40 for tile)
+        color2: optional secondary color (used by "net")
     """
+    # Bitmap path: prefer PNG if present and not in the primitive-only set
+    primitive_only = ("terminal", "fan", "thermo", "net")
+    bitmap_path = _ICONS_DIR / (kind + ".png")
+    if kind not in primitive_only and bitmap_path.exists():
+        _draw_bitmap(canvas, kind, x, y, size)
+        return
+
     d = ImageDraw.Draw(canvas.image)
     if kind == "cpu":
         _draw_cpu(d, x, y, size, color)
@@ -241,4 +331,4 @@ def draw_icon(
     elif kind == "disk":
         _draw_disk(d, x, y, size, color)
     else:
-        raise ValueError(f"Unknown icon kind: {kind!r}")
+        raise ValueError("Unknown icon kind: " + repr(kind))

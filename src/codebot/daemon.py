@@ -350,8 +350,8 @@ class Daemon:
 
         last_render = 0.0
         last_collect_refresh = 0.0
-        # sim 拉高到 30fps 让交互顺畅, USB 保持 15fps
-        render_hz = 30 if self.sim else 15
+        # sim 8fps 省 CPU / 带宽, USB 15fps 让画面顺
+        render_hz = 8 if self.sim else 15
 
         log.info("Daemon running. Press Ctrl+C to stop.")
         try:

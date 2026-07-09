@@ -161,7 +161,7 @@ def _make_handler(sim: SimServer):
 
 
 def _encode_png(image: Image.Image) -> bytes:
-    """Encode Pillow Image to PNG bytes. optimize=False for speed at 30fps."""
+    """Encode Pillow Image to PNG bytes. optimize=False for speed at 8fps (sim)."""
     buf = BytesIO()
     # 320x172 is small; default compression is fine, optimize=True is slow.
     image.save(buf, format="PNG", optimize=False)
@@ -306,13 +306,13 @@ document.getElementById('long-press').onclick = () => {
   setTimeout(() => postTouch(2, W/2, H/2), 150);  // UP
 };
 
-// 帧拉取: 每 33ms 拉一帧 (~30fps)
+// 帧拉取: 每 125ms 拉一帧 (~8fps, 与 daemon render_hz 对齐)
 const img = new Image();
 img.onload = () => { ctx.drawImage(img, 0, 0, W, H); };
 function refresh() {
   img.src = '/frame.png?t=' + Date.now();
 }
-setInterval(refresh, 33);
+setInterval(refresh, 125);
 refresh();
 </script>
 </body>

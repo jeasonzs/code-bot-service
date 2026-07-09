@@ -163,3 +163,19 @@ def draw_text_right(
     tw = bbox[2] - bbox[0]
     draw.text((x_right - tw, y), s, fill=(color.r, color.g, color.b), font=font)
     return tw
+
+
+def draw_text_centered(
+    canvas: Canvas,
+    s: str,
+    cx: int,
+    y: int,
+    font: ImageFont.ImageFont,
+    color: Color,
+) -> int:
+    """Draw text horizontally centered on cx. Returns the width drawn."""
+    draw = ImageDraw.Draw(canvas.image)
+    bbox = draw.textbbox((0, 0), s, font=font)
+    tw = bbox[2] - bbox[0]
+    draw.text((cx - tw // 2, y), s, fill=(color.r, color.g, color.b), font=font)
+    return tw
