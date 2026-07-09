@@ -32,12 +32,12 @@ from ..theme import Color, VSCodeDark, SCREEN_W
 from ..widgets import get_font
 
 
-DEFAULT_ICON_SIZE = 12
-DEFAULT_FONT_SIZE = 11
+DEFAULT_ICON_SIZE = 16
+DEFAULT_FONT_SIZE = 16
 # Row height: SystemPage footer is 24 px tall (y=148..172). Vertical
 # centering math uses this to place the icon and text on the row's
 # optical center.
-DEFAULT_ROW_H = 24
+DEFAULT_ROW_H = 28
 # Horizontal padding (left AND right) inside the content area. Keeps
 # items from crowding the screen edges.
 SIDE_MARGIN = 8

@@ -31,7 +31,7 @@ from .base import BasePage
 ROW1_Y = 0                     # CPU | MEM top edge
 ROW2_Y = 72                    # NET | FREQ top edge
 ROW_H = 72                     # body row height
-FOOTER_Y = 148                 # footer baseline (icon y)
+FOOTER_Y = 144                 # footer baseline (icon y)
 
 CELL_W = SCREEN_W // 2         # 160
 
@@ -148,6 +148,6 @@ class SystemPage(BasePage):
                 {"icon": "down", "value": _fmt_rate(snap.rx_rate_kbs),
                  "color": VSCodeDark.NET_DOWN},
                 {"icon": "disk", "value": "{0:.0f}%".format(snap.disk_pct),
-                 "color": VSCodeDark.FG_DIM},
+                 "color": VSCodeDark.NET_UP},
             ],
         ).draw(canvas)

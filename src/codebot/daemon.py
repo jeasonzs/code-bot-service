@@ -67,7 +67,7 @@ class Daemon:
         self._canvas = Canvas()
         self._pages = make_pages()
         # 临时: 启动后默认显示 GitHub 页面 (index=2). 改回 0 恢复 SystemPage.
-        self._current_page = 2
+        self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
         # Load (and create if missing) the per-user config file. The
         # collector uses it for the GitHub token; future subsystems can

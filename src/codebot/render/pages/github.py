@@ -32,7 +32,7 @@ from .base import BasePage
 ROW1_Y = 0
 ROW2_Y = 72
 ROW_H = 72
-FOOTER_Y = 148
+FOOTER_Y = 144
 
 CELL_W = SCREEN_W // 2  # 160
 
