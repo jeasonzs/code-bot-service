@@ -24,6 +24,7 @@ from ..canvas import Canvas
 from ..theme import VSCodeDark, SCREEN_W
 from ..views.footer_view import FooterView
 from ..views.tile_view import TileView
+from ..views.warning_banner import WarningBannerView
 from .base import BasePage
 
 
@@ -129,6 +130,28 @@ def _event_footer_item(snap: Optional[GithubSnapshot]) -> dict:
     return {"icon": "context", "value": f"{verb} {obj} {age}", "color": color}
 
 
+# ---- Warning banner ----
+#
+# Map a token_status value → (title, hint, accent). The banner is
+# rendered last (on top of the tiles) when the snapshot's token isn't
+# usable. We keep the tile grid visible underneath so the user can see
+# *which* data is missing, while the banner calls attention to the
+# fix-it step.
+_WARNING_BY_STATUS = {
+    "no_token": (
+        "GITHUB_TOKEN not set",
+        "Set $GITHUB_TOKEN env or github.token in ~/.code_bot/config.yml",
+        VSCodeDark.WARNING,
+    ),
+    "bad_auth": (
+        "GitHub token rejected",
+        "401 Bad Credentials — token expired or revoked. "
+        "Regenerate at github.com/settings/tokens",
+        VSCodeDark.DANGER,
+    ),
+}
+
+
 class GithubPage(BasePage):
     """GitHub stats dashboard. Shares a GithubCollector with the daemon."""
 
@@ -151,6 +174,11 @@ class GithubPage(BasePage):
         self._draw_dividers(canvas)
         self._draw_tiles(canvas, snap)
         self._draw_footer(canvas, snap)
+        # Warning overlay must be drawn LAST so it sits on top of the
+        # tile grid. We keep the grid visible underneath so the user
+        # can see *which* fields are unpopulated; the banner just calls
+        # attention to the underlying credential issue.
+        self._draw_warning(canvas, snap)
 
     def _dump_snap(self, snap: Optional[GithubSnapshot]) -> None:
         """Print ``snap`` to stdout, but only when it changes.
@@ -195,16 +223,11 @@ class GithubPage(BasePage):
     def _draw_tiles(canvas: Canvas, snap: Optional[GithubSnapshot]) -> None:
         # ---- STARS (top-left): digits "1.2" + unit "k", bar to 10k ----
         sd, su = _fmt_stars(snap.stars if snap else None)
-        bar_pct = None
-        if snap is not None and snap.stars:
-            # Cap at 10k stars for the bar (so 10k+ shows 100%).
-            bar_pct = max(0.0, min(100.0, (snap.stars / 10000.0) * 100.0))
         TileView(
             x=0, y=ROW1_Y, w=CELL_W, h=ROW_H,
             icon="stars", icon_color=VSCodeDark.WARNING,
             title="STARS", title_color=VSCodeDark.WARNING,
-            value_digits=sd, value_unit=su,
-            bar_pct=bar_pct, bar_color=VSCodeDark.WARNING,
+            value_digits=sd, value_unit=su
         ).draw(canvas)
 
         # ---- FOLLOWERS (top-right): count of people following the user ----
@@ -242,3 +265,20 @@ class GithubPage(BasePage):
             y=FOOTER_Y,
             items=[_event_footer_item(snap)],
         ).draw(canvas)
+
+    @staticmethod
+    def _draw_warning(canvas: Canvas, snap: Optional[GithubSnapshot]) -> None:
+        """Render the warning overlay if the token isn't usable.
+
+        No banner for transient network errors — those pass through
+        silently and the page keeps showing whatever data was last
+        successfully fetched. Only credential problems (missing or
+        rejected token) get the overlay, since those won't fix
+        themselves without user action.
+        """
+        status = snap.token_status if snap is not None else "ok"
+        spec = _WARNING_BY_STATUS.get(status)
+        if spec is None:
+            return
+        title, hint, accent = spec
+        WarningBannerView(title=title, hint=hint, accent=accent).draw(canvas)

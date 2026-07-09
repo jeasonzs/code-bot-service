@@ -60,6 +60,18 @@ class GithubSnapshot:
     latest_event_repo: Optional[str]    # short repo name, e.g. "code-bot-service"
     latest_event_ts: Optional[float]    # unix time of the event
     ts: float                           # unix time of the snapshot
+    # Token/credential health. The page renders a Warning overlay when
+    # this is anything other than "ok"; transient errors don't trip it.
+    #   "ok"        — last API call succeeded (or no calls yet because
+    #                 token is unset; see "no_token" below)
+    #   "no_token"  — token is empty (env or config). Page shows
+    #                 "GITHUB_TOKEN not set" warning.
+    #   "bad_auth"  — GitHub returned HTTP 401 (bad/expired/revoked
+    #                 PAT). Page shows "Bad credentials" warning.
+    #   "transient" — network/timeout/5xx — page keeps showing the
+    #                 last known data without a warning overlay.
+    token_status: str = "ok"
+    token_error: Optional[str] = None  # short human-readable hint
 
 
 def _empty_snapshot() -> GithubSnapshot:
@@ -69,6 +81,7 @@ def _empty_snapshot() -> GithubSnapshot:
         latest_event_type=None, latest_event_object=None,
         latest_event_repo=None, latest_event_ts=None,
         ts=0.0,
+        token_status="ok", token_error=None,
     )
 
 
@@ -81,6 +94,17 @@ def _event_unix_ts(iso: Optional[str]) -> Optional[float]:
         return ct.timestamp()
     except (ValueError, TypeError):
         return None
+
+
+class GithubAuthError(Exception):
+    """Raised by :meth:`GithubCollector._get` when GitHub returns HTTP 401.
+
+    Callers (currently only :meth:`GithubCollector._refresh`) should
+    catch this, mark the snapshot's ``token_status`` as ``"bad_auth"``,
+    and keep the previous snapshot's data (or empty values). A 401 is
+    NOT a transient error — it won't fix itself until the user updates
+    the token.
+    """
 
 
 class GithubCollector:
@@ -103,6 +127,20 @@ class GithubCollector:
         self._token = env_token or cfg_token
         if not env_token and cfg_token:
             log.info("Loaded GitHub token from %s", config.path)
+
+        # If no token is configured, mark the initial snapshot so the
+        # page can render a Warning immediately (instead of waiting for
+        # the first refresh tick to fail).
+        if not self._token:
+            self._latest = GithubSnapshot(
+                user=None, stars=None, followers=None,
+                commits_today=None, open_prs=None,
+                latest_event_type=None, latest_event_object=None,
+                latest_event_repo=None, latest_event_ts=None,
+                ts=0.0,
+                token_status="no_token",
+                token_error="Set GITHUB_TOKEN env or github.token in ~/.code_bot/config.yml",
+            )
 
     @property
     def has_token(self) -> bool:
@@ -146,44 +184,84 @@ class GithubCollector:
         # /user returns the full profile — login, followers count, etc.
         # One call gives us both `user` and `followers`; no need to
         # hit /users/{login} separately.
-        me = self._fetch_user_profile()
-        if me is None:
-            return  # keep the previous snapshot; no partial updates
-        user = me.get("login")
-        followers = int(me.get("followers", 0) or 0)
+        try:
+            me = self._fetch_user_profile()
+            if me is None:
+                # Transient error (network / 5xx / etc.) — keep the
+                # previous snapshot's data but mark token_status as
+                # "transient" so the page can show a soft hint if it
+                # wants to. For now we don't render a banner for
+                # transient errors, so we just leave status as "ok".
+                return
+            user = me.get("login")
+            followers = int(me.get("followers", 0) or 0)
 
-        stars = self._fetch_total_stars(user)
-        commits_today = self._fetch_commits_today(user)
-        open_prs = self._fetch_open_prs(user)
-        ev = self._fetch_latest_event(user)
+            stars = self._fetch_total_stars(user)
+            commits_today = self._fetch_commits_today(user)
+            open_prs = self._fetch_open_prs(user)
+            ev = self._fetch_latest_event(user)
 
-        snap = GithubSnapshot(
-            user=user, stars=stars, followers=followers,
-            commits_today=commits_today, open_prs=open_prs,
-            latest_event_type=ev[0] if ev else None,
-            latest_event_object=ev[1] if ev else None,
-            latest_event_repo=ev[2] if ev else None,
-            latest_event_ts=ev[3] if ev else None,
-            ts=time.time(),
-        )
-        with self._lock:
-            self._latest = snap
+            snap = GithubSnapshot(
+                user=user, stars=stars, followers=followers,
+                commits_today=commits_today, open_prs=open_prs,
+                latest_event_type=ev[0] if ev else None,
+                latest_event_object=ev[1] if ev else None,
+                latest_event_repo=ev[2] if ev else None,
+                latest_event_ts=ev[3] if ev else None,
+                ts=time.time(),
+                token_status="ok", token_error=None,
+            )
+            with self._lock:
+                self._latest = snap
+        except GithubAuthError as e:
+            # 401 Bad Credentials — keep previous data but flag the
+            # snapshot so the page can show a Warning banner.
+            log.warning("GitHub auth failure: %s", e)
+            with self._lock:
+                prev = self._latest
+                self._latest = GithubSnapshot(
+                    **prev.__dict__,
+                    token_status="bad_auth",
+                    token_error="GitHub token rejected (401). "
+                                "Check ~/.code_bot/config.yml or "
+                                "$GITHUB_TOKEN.",
+                )
 
     # ---- HTTP ----
 
     def _get(self, path: str) -> Optional[object]:
         """GET ``path`` (relative to GITHUB_API, or absolute URL) and return
-        the parsed JSON. ``None`` on any error (logged at WARNING)."""
+        the parsed JSON. ``None`` on any error (logged at WARNING).
+
+        HTTP 401 (Bad Credentials) is propagated via the
+        :class:`GithubAuthError` exception so :meth:`_refresh` can flag
+        the snapshot's ``token_status`` as ``"bad_auth"`` and surface a
+        Warning overlay on the page.
+        """
         url = path if path.startswith("http") else (GITHUB_API + path)
         req = urllib.request.Request(url)
         req.add_header("Authorization", "token " + self._token)
         req.add_header("Accept", "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError,
-                json.JSONDecodeError, TimeoutError, OSError) as e:
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    body = ""
+                    try:
+                        body = e.read().decode("utf-8", errors="replace")[:200]
+                    except Exception:
+                        pass
+                    log.warning("GitHub GET %s → 401 Bad Credentials: %s", url, body)
+                    raise GithubAuthError("HTTP 401 Bad Credentials") from e
+                log.warning("GitHub GET %s failed: HTTP %s", url, e.code)
+                return None
+        except GithubAuthError:
+            raise
+        except (urllib.error.URLError, json.JSONDecodeError,
+                TimeoutError, OSError) as e:
             log.warning("GitHub GET %s failed: %s", url, e)
             return None
 
