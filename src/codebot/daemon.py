@@ -11,6 +11,7 @@ import sys
 import time
 import logging
 import threading
+from pathlib import Path
 from typing import Optional
 
 from .transport.usb import UsbTransport
@@ -25,11 +26,13 @@ from .render.theme import VSCodeDark, SCREEN_W, SCREEN_H
 from .render.pages.system import SystemPage
 from .render.pages.quick_actions import QuickActionsPage
 from .render.pages.github import GithubPage
-from .render.pages.placeholders import ClaudePage, OpenclawPage, HermesPage
+from .render.pages.claude import ClaudePage
+from .render.pages.placeholders import OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
 from .render.pages.custom_actions import CustomActionsPage
 from .collectors.system import SystemCollector
 from .collectors.github import GithubCollector
+from .collectors.claude import ClaudeCollector
 from .config import Config
 from .actions.base import get_executor
 
@@ -45,7 +48,7 @@ def make_pages() -> list:
     return [
         SystemPage(collector=None),  # 1 — collector wired in Daemon.__init__
         GithubPage(collector=None),  # 2 — collector wired in Daemon.__init__
-        ClaudePage(),         # 3
+        ClaudePage(collector=None),  # 3 — wired in Daemon.__init__
         CustomActionsPage(),  # 4
     ]
 
@@ -74,6 +77,14 @@ class Daemon:
         # of a token-authenticated user). If GITHUB_TOKEN is unset the
         # collector simply never starts and the page shows "—".
         self._gh_collector = GithubCollector(refresh_interval=60.0, config=self._config)
+        # Claude Code state file: 4 Hz mtime poll, default path
+        # ~/.code-bot/claude-state.json (overridable for tests via
+        # state_path=). 30 s stale -> status flips to "stopped".
+        self._claude_collector = ClaudeCollector(
+            hz=4.0,
+            state_path=Path.home() / ".code-bot" / "claude-state.json",
+            stale_after_s=30.0,
+        )
         # Wire the shared collectors into their pages (constructed with
         # ``None`` placeholders above).
         for p in self._pages:
@@ -81,6 +92,8 @@ class Daemon:
                 p._collector = self._sys_collector
             elif isinstance(p, GithubPage):
                 p._collector = self._gh_collector
+            elif isinstance(p, ClaudePage):
+                p._collector = self._claude_collector
         self._actions_page: Optional[CustomActionsPage] = None
         self._custom_subpage = 0
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
@@ -355,6 +368,7 @@ class Daemon:
         # Start collectors
         self._sys_collector.start()
         self._gh_collector.start()
+        self._claude_collector.start()
         for p in self._pages:
             if hasattr(p, "refresh"):
                 p.refresh()
@@ -389,6 +403,7 @@ class Daemon:
         finally:
             self._sys_collector.stop()
             self._gh_collector.stop()
+            self._claude_collector.stop()
             if self._sim is not None:
                 self._sim.stop()
             if self._usb is not None:

@@ -1,4 +1,4 @@
-"""Placeholder pages: claude, openclaw, hermes (v1 not implemented)."""
+"""Placeholder pages: openclaw, hermes (v1 not implemented)."""
 
 from __future__ import annotations
 
@@ -36,13 +36,6 @@ def _render_placeholder(canvas: Canvas, name: str, message: str) -> None:
     bbox = draw.textbbox((0, 0), hint, font=font_small)
     tw = bbox[2] - bbox[0]
     draw.text(((320 - tw) // 2, 140), hint, fill=(VSCodeDark.FG_DISABLED.r, VSCodeDark.FG_DISABLED.g, VSCodeDark.FG_DISABLED.b), font=font_small)
-
-
-class ClaudePage(BasePage):
-    title = "Claude"
-
-    def render(self, canvas: Canvas) -> None:
-        _render_placeholder(canvas, "Claude Code", "Not implemented in v1")
 
 
 class OpenclawPage(BasePage):
