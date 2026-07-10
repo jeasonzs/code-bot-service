@@ -44,12 +44,9 @@ def make_pages() -> list:
     """Create the default 7-page list."""
     return [
         SystemPage(collector=None),  # 1 — collector wired in Daemon.__init__
-        QuickActionsPage(),   # 2
-        GithubPage(collector=None),  # 3 — collector wired in Daemon.__init__
-        ClaudePage(),         # 4
-        OpenclawPage(),       # 5
-        HermesPage(),         # 6
-        CustomActionsPage(),  # 7
+        GithubPage(collector=None),  # 2 — collector wired in Daemon.__init__
+        ClaudePage(),         # 3
+        CustomActionsPage(),  # 4
     ]
 
 
@@ -135,7 +132,7 @@ class Daemon:
 
         event_type: 0=DOWN, 1=MOVE, 2=UP, 3=SWIPE_LEFT, 4=SWIPE_RIGHT, 5=LONG_PRESS
         """
-        log.debug("Touch: type=%d x=%d y=%d", event_type, x, y)
+        log.info("Touch: type=%d x=%d y=%d", event_type, x, y)
         if event_type == TouchEvent.SWIPE_LEFT:
             self._next_page()
         elif event_type == TouchEvent.SWIPE_RIGHT:

@@ -40,7 +40,7 @@ from ..widgets import (
 # Default geometry constants (overridable per-instance). These match the
 # SystemPage 2x2 layout on the 1.47" 320x172 LCD.
 DEFAULT_ICON_SIZE = 40
-DEFAULT_TITLE_FONT_SIZE = 11
+DEFAULT_TITLE_FONT_SIZE = 14
 DEFAULT_VALUE_FONT_SIZE = 36
 DEFAULT_UNIT_FONT_SIZE = 12
 DEFAULT_BAR_HEIGHT = 4

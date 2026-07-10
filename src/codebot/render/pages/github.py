@@ -226,7 +226,7 @@ class GithubPage(BasePage):
         TileView(
             x=0, y=ROW1_Y, w=CELL_W, h=ROW_H,
             icon="stars", icon_color=VSCodeDark.WARNING,
-            title="STARS", title_color=VSCodeDark.WARNING,
+            title="Star", title_color=VSCodeDark.WARNING,
             value_digits=sd, value_unit=su
         ).draw(canvas)
 
@@ -245,7 +245,7 @@ class GithubPage(BasePage):
         TileView(
             x=0, y=ROW2_Y, w=CELL_W, h=ROW_H,
             icon="commits", icon_color=VSCodeDark.SUCCESS,
-            title="COMMITS", title_color=VSCodeDark.SUCCESS,
+            title="Commit", title_color=VSCodeDark.SUCCESS,
             value_digits=_fmt_int(snap.commits_today if snap else None),
             value_unit="Today",
         ).draw(canvas)
@@ -254,7 +254,7 @@ class GithubPage(BasePage):
         TileView(
             x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
             icon="prs", icon_color=VSCodeDark.SYN_FUNC,
-            title="PRS", title_color=VSCodeDark.SYN_FUNC,
+            title="PR", title_color=VSCodeDark.SYN_FUNC,
             value_digits=_fmt_int(snap.open_prs if snap else None),
             value_unit="Open",
         ).draw(canvas)
