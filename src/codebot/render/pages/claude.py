@@ -39,13 +39,15 @@ FOOTER_Y = 144
 
 CELL_W = SCREEN_W // 2
 
-# Statusline version: 4-state enum (vs the 6-state hook version).
+# 6-state status enum (from claude-status-hook.py events).
 # Color choices match the rest of the UI's status vocabulary.
 _STATUS_COLOR = {
-    "active":  VSCodeDark.SUCCESS,
-    "idle":    VSCodeDark.FG_DIM,
-    "stopped": VSCodeDark.FG_DISABLED,
-    "error":   VSCodeDark.DANGER,
+    "idle":       VSCodeDark.FG_DIM,
+    "thinking":   VSCodeDark.INFO,
+    "tool":       VSCodeDark.SUCCESS,
+    "permission": VSCodeDark.WARNING,
+    "stopped":    VSCodeDark.FG_DISABLED,
+    "error":      VSCodeDark.DANGER,
 }
 
 
