@@ -1,8 +1,8 @@
 """Claude Code page: live state from ~/.code-bot/claude-state.json.
 
 Layout (mirrors SystemPage, full-screen 2x2 + footer):
-  y=0..72    STATUS (active/idle/stopped/error) | TOKENS IN (ctx in)
-  y=72..144  TOKENS OUT (ctx out)               | CONTEXT (used % + bar)
+  y=0..72    STATUS (active/idle/stopped/error) | CONTEXT (used % + bar)
+  y=72..144  IN (ctx in)                        | OUT (ctx out)
   y=144..172 >_  Model  cwd/basename  $cost     (footer)
 
 Data source: scripts/claude-statusline.py writes the state file from
@@ -10,7 +10,7 @@ Claude Code's statusline payload. Statusline has no event semantics
 (no per-tool/per-prompt info), so we surface context window + cost +
 model instead - the metrics a USB-screen glance is actually useful for.
 
-Tiles use existing icons: status / down / up / context. No token-in /
+Tiles use existing icons: status / context / down / up. No token-in /
 token-out icons needed since the tokens shown here are context-window
 sizes, not per-message flows.
 """
@@ -50,6 +50,20 @@ _STATUS_COLOR = {
     "error":      VSCodeDark.DANGER,
 }
 
+# Short LCD labels for the 6-state status enum. The collector stores
+# full names (semantic clarity, easier to grep / debug) but the STATUS
+# tile only has room for ~4 chars at 18 pt bold without risking
+# overflow on tight rows. "perm" and "stop" are unambiguous in the
+# context of the colored badge.
+_STATUS_SHORT = {
+    "idle":       "idle",
+    "thinking":   "think",
+    "tool":       "tool",
+    "permission": "perm",
+    "stopped":    "stop",
+    "error":      "error",
+}
+
 
 def _truncate(s: Optional[str], n: int) -> str:
     if not s:
@@ -59,6 +73,65 @@ def _truncate(s: Optional[str], n: int) -> str:
 
 def _fmt_int(n: Optional[int]) -> str:
     return "0" if n is None else str(n)
+
+
+def _fmt_token_count(n: Optional[int]) -> str:
+    """Format a token count with 3 significant digits.
+
+    Returns only the numeric portion (no unit). Pair with ``_token_unit``
+    to render the K/M/G/T suffix separately so TileView can lay it out
+    in its own smaller style block.
+
+    Rules:
+      - None -> "—" (so empty / unparsed state still shows clearly)
+      - < 1000 -> integer as-is                  e.g. 812 -> "812"
+      - < 1e6  -> divide by 1e3, at most 1 dec   15500 -> "15.5", 1234 -> "1.23"
+      - < 1e9  -> divide by 1e6, at most 1 dec
+      - < 1e12 -> divide by 1e9, at most 1 dec
+      - else   -> divide by 1e12, at most 1 dec
+
+    "3 sig figs with at most 1 decimal": we format with ``{:.1f}`` and
+    then trim a trailing ``.0`` so 15000 -> "15" (cleaner on the LCD).
+    """
+    if n is None:
+        return "—"
+    if n < 0:
+        return "-" + _fmt_token_count(-n)
+    if n < 1000:
+        return str(n)
+
+    scales = (
+        (1_000_000_000_000, 1_000_000_000_000),
+        (1_000_000_000,     1_000_000_000),
+        (1_000_000,         1_000_000),
+        (1_000,             1_000),
+    )
+    for divisor, _ in scales:
+        if n >= divisor:
+            value = n / divisor
+            s = ("{0:.1f}").format(value)
+            if s.endswith(".0"):
+                s = s[:-2]
+            return s
+    return str(n)
+
+
+def _token_unit(n: Optional[int]) -> str:
+    """Unit suffix matching ``_fmt_token_count``: "" / "K" / "M" / "G" / "T".
+
+    Returns "" for None and for n < 1000 (so the tile shows just "812"
+    without a stray suffix). Pairs with _fmt_token_count to keep the
+    numeric and unit pieces separate for TileView styling.
+    """
+    if n is None or n < 1000:
+        return ""
+    if n < 1_000_000:
+        return "K"
+    if n < 1_000_000_000:
+        return "M"
+    if n < 1_000_000_000_000:
+        return "G"
+    return "T"
 
 
 def _fmt_pct(n: Optional[float]) -> str:
@@ -148,43 +221,25 @@ class ClaudePage(BasePage):
     @staticmethod
     def _draw_tiles(canvas: Canvas, snap: ClaudeSnapshot) -> None:
         color = _STATUS_COLOR.get(snap.status, VSCodeDark.FG_DIM)
+        # Map the 6-state enum to short LCD labels (idle / think / tool /
+        # perm / stop / error). Full names stay in the collector's
+        # status field for debuggability; only the rendered text shrinks.
+        status_label = _STATUS_SHORT.get(snap.status, snap.status)
 
-        # ---- STATUS tile (state name, 18 pt bold - fits "stopped") ----
+        # ---- STATUS tile (short state name, 24 pt bold) ----
         # TileView's overflow lesson: "permission" (10 chars at 36 pt bold)
-        # overflowed the 144 px value region. We use 18 pt bold so all 4
-        # status names fit. The STATUS title underneath already labels
-        # the row, so the small name reads as a state badge.
+        # overflowed the 144 px value region. With short labels the worst
+        # case is "error" / "think" (5 chars); 24 pt bold comfortably
+        # fits and reads as a real state badge instead of a tiny label.
         TileView(
             x=0, y=ROW1_Y, w=CELL_W, h=ROW_H,
             icon="status", icon_color=color,
             title="STATUS", title_color=color,
-            value_digits=snap.status,
+            value_digits=status_label,
             value_unit="",
             value_color=color,
             value_font="bold",
-            value_font_size=18,
-        ).draw(canvas)
-
-        # ---- TOKENS IN (current context window input tokens) ----
-        TileView(
-            x=CELL_W, y=ROW1_Y, w=CELL_W, h=ROW_H,
-            icon="down", icon_color=VSCodeDark.INFO,
-            title="CTX IN", title_color=VSCodeDark.INFO,
-            value_digits=_fmt_int(snap.context_in),
-            value_unit="",
-            value_color=VSCodeDark.FG,
-            value_font="digital",
-        ).draw(canvas)
-
-        # ---- TOKENS OUT (current context window output tokens) ----
-        TileView(
-            x=0, y=ROW2_Y, w=CELL_W, h=ROW_H,
-            icon="up", icon_color=VSCodeDark.WARNING,
-            title="CTX OUT", title_color=VSCodeDark.WARNING,
-            value_digits=_fmt_int(snap.context_out),
-            value_unit="",
-            value_color=VSCodeDark.FG,
-            value_font="digital",
+            value_font_size=24,
         ).draw(canvas)
 
         # ---- CONTEXT tile (used % as number + dotted bar) ----
@@ -204,9 +259,9 @@ class ClaudePage(BasePage):
                 bar_color = VSCodeDark.SUCCESS
 
         TileView(
-            x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
+            x=CELL_W, y=ROW1_Y, w=CELL_W, h=ROW_H,
             icon="context", icon_color=bar_color,
-            title="CONTEXT", title_color=bar_color,
+            title="CTX", title_color=bar_color,
             value_digits=_fmt_pct(pct),
             value_unit="%" if pct is not None else "",
             value_color=bar_color,
@@ -215,13 +270,41 @@ class ClaudePage(BasePage):
             bar_color=bar_color,
         ).draw(canvas)
 
+        # ---- IN tile (current context window input tokens) ----
+        # value_digits carries the numeric portion; value_unit carries the
+        # K/M/G/T suffix so TileView can lay them out in separate style
+        # blocks (suffix is smaller / dimmer). value_color matches
+        # title_color so the whole tile reads as one INFO blue badge.
+        TileView(
+            x=0, y=ROW2_Y, w=CELL_W, h=ROW_H,
+            icon="down", icon_color=VSCodeDark.INFO,
+            title="IN", title_color=VSCodeDark.INFO,
+            value_digits=_fmt_token_count(snap.context_in),
+            value_unit=_token_unit(snap.context_in),
+            value_color=VSCodeDark.INFO,
+            value_font="digital",
+        ).draw(canvas)
+
+        # ---- OUT tile (current context window output tokens) ----
+        # value_color matches title_color (WARNING) so the whole tile
+        # reads as one yellow badge - distinguishes OUT from IN at a
+        # glance without needing different icons.
+        TileView(
+            x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
+            icon="up", icon_color=VSCodeDark.WARNING,
+            title="OUT", title_color=VSCodeDark.WARNING,
+            value_digits=_fmt_token_count(snap.context_out),
+            value_unit=_token_unit(snap.context_out),
+            value_color=VSCodeDark.WARNING,
+            value_font="digital",
+        ).draw(canvas)
+
     @staticmethod
     def _draw_footer(canvas: Canvas, snap: ClaudeSnapshot) -> None:
         FooterView(
             y=FOOTER_Y,
             items=[
                 {
-                    "icon": "terminal",
                     "value": _footer_text(snap),
                     "color": _STATUS_COLOR.get(snap.status, VSCodeDark.FG_DIM),
                 },

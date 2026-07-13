@@ -51,16 +51,29 @@ ITEM_GAP = 4
 
 @dataclass
 class FooterItem:
-    """One item in the footer: a small icon + a text value + a color."""
+    """One item in the footer: a small icon + a text value + a color.
 
-    icon: str
-    value: str
-    color: Color
+    ``icon`` is optional: pass "" or omit it from the input dict to render
+    a text-only item. Useful when the icon adds visual noise (e.g. the
+    Claude page footer where the `>_` prompt already conveys the
+    "terminal" feel).
+    """
+
+    icon: str = ""
+    value: str = ""
+    color: Color = VSCodeDark.FG_DIM
 
     @classmethod
     def from_dict(cls, d: dict) -> "FooterItem":
-        """Convenience: accept {icon, value, color} dicts from callers."""
-        return cls(icon=d["icon"], value=d["value"], color=d["color"])
+        """Convenience: accept {value, color, icon?} dicts from callers.
+
+        ``icon`` defaults to "" (text-only item). Other keys are required.
+        """
+        return cls(
+            icon=d.get("icon", ""),
+            value=d["value"],
+            color=d["color"],
+        )
 
 
 # Public type: callers can pass either dicts or FooterItem instances.
@@ -117,12 +130,17 @@ class FooterView:
         text_h = self._text_height(d, "Mg", font)  # "Mg" approximates cap+descender
 
         for item, (x_start, _x_end) in zip(items, slots):
-            ix = x_start
             iy = row_cy - self.icon_size // 2
-            tx = x_start + self.icon_size + ITEM_GAP
             ty = row_cy - text_h // 2
-            draw_icon(canvas, item.icon, ix, iy, item.color,
-                      size=self.icon_size)
+            if item.icon:
+                # Icon + ITEM_GAP + text. draw_icon is a no-op for unknown
+                # kinds, so the text falls back to the slot start cleanly.
+                draw_icon(canvas, item.icon, x_start, iy, item.color,
+                          size=self.icon_size)
+                tx = x_start + self.icon_size + ITEM_GAP
+            else:
+                # Text-only item: start the text at the slot's left edge.
+                tx = x_start
             d.text(
                 (tx, ty),
                 item.value,
