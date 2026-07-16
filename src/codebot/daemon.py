@@ -24,17 +24,15 @@ from .render.canvas import Canvas, DirtyRect
 from .render.widgets import draw_indicator, draw_title
 from .render.theme import VSCodeDark, SCREEN_W, SCREEN_H
 from .render.pages.system import SystemPage
-from .render.pages.quick_actions import QuickActionsPage
+from .render.pages.clock import ClockPage
 from .render.pages.github import GithubPage
 from .render.pages.claude import ClaudePage
 from .render.pages.placeholders import OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
-from .render.pages.custom_actions import CustomActionsPage
 from .collectors.system import SystemCollector
 from .collectors.github import GithubCollector
 from .collectors.claude import ClaudeCollector
 from .config import Config
-from .actions.base import get_executor
 
 
 log = logging.getLogger("codebot")
@@ -44,12 +42,12 @@ log = logging.getLogger("codebot")
 # Page registry (order matches the 7-segment indicator)
 # ==============================================================
 def make_pages() -> list:
-    """Create the default 7-page list."""
+    """Create the default page list."""
     return [
-        SystemPage(collector=None),  # 1 — collector wired in Daemon.__init__
-        GithubPage(collector=None),  # 2 — collector wired in Daemon.__init__
-        ClaudePage(collector=None),  # 3 — wired in Daemon.__init__
-        CustomActionsPage(),  # 4
+        ClockPage(),                       # 1
+        SystemPage(collector=None),        # 2 — collector wired in Daemon.__init__
+        GithubPage(collector=None),        # 3 — collector wired in Daemon.__init__
+        ClaudePage(collector=None),        # 4 — wired in Daemon.__init__
     ]
 
 
@@ -66,7 +64,7 @@ class Daemon:
         self._stop = threading.Event()
         self._canvas = Canvas()
         self._pages = make_pages()
-        # 临时: 启动后默认显示 GitHub 页面 (index=2). 改回 0 恢复 SystemPage.
+        # 启动后默认显示第一页 (ClockPage)
         self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
         # Load (and create if missing) the per-user config file. The
@@ -94,14 +92,8 @@ class Daemon:
                 p._collector = self._gh_collector
             elif isinstance(p, ClaudePage):
                 p._collector = self._claude_collector
-        self._actions_page: Optional[CustomActionsPage] = None
-        self._custom_subpage = 0
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
         self._force_full_flush = True
-        for p in self._pages:
-            if isinstance(p, CustomActionsPage):
-                self._actions_page = p
-                break
 
         # Touch event queue: HTTP thread (sim) 或 USB poll 都把事件 push 进来,
         # 主循环统一 drain → _handle_touch, 避免 _handle_touch 跨线程调用
@@ -156,63 +148,19 @@ class Daemon:
 
     def _next_page(self) -> None:
         self._current_page = (self._current_page + 1) % len(self._pages)
-        self._custom_subpage = 0
         log.info("Page: %d/%d (%s)", self._current_page + 1, len(self._pages),
                  self._pages[self._current_page].title)
 
     def _prev_page(self) -> None:
         self._current_page = (self._current_page - 1) % len(self._pages)
-        self._custom_subpage = 0
         log.info("Page: %d/%d (%s)", self._current_page + 1, len(self._pages),
                  self._pages[self._current_page].title)
 
     def _dispatch_long_press(self, x: int, y: int) -> None:
         """Handle long-press: action buttons in current page."""
         page = self._pages[self._current_page]
-        action_id = page.on_touch(TouchEvent.LONG_PRESS, x, y) if hasattr(page, 'on_touch') else None
-        if not action_id:
-            return
-        if action_id.startswith("action:"):
-            # Custom Actions page
-            idx = int(action_id.split(":")[1])
-            self._execute_custom_action(idx)
-        elif action_id.startswith("quick_action:"):
-            idx = int(action_id.split(":")[1])
-            self._execute_quick_action(idx)
-
-    def _execute_custom_action(self, idx: int) -> None:
-        if self._actions_page is None or idx >= len(self._actions_page.actions):
-            return
-        action = self._actions_page.actions[idx]
-        log.info("Executing custom action %d: %s (%s)", idx, action.name, action.action_type)
-        # 注: v3 不再用 CMD_HID_KEYSTROKES 自定义命令. 设备检测触摸后自己构造
-        # 标准 HID Keyboard report 发到 host (走 EP3 IN). host 端不需要任何 service.
-        if action.action_type == "hid_keystrokes":
-            log.warning(
-                "Action '%s' is type 'hid_keystrokes' (deprecated in v3). "
-                "The device now generates HID reports autonomously from touch; "
-                "this action no longer sends any host-side keystroke.",
-                action.name,
-            )
-            return
-        executor = get_executor(action.action_type)
-        if executor is None:
-            log.error("Unknown action type: %s", action.action_type)
-            return
-        result = executor.execute(action.config)
-        log.info("Action result: %s", result)
-
-    def _execute_quick_action(self, idx: int) -> None:
-        if not isinstance(self._pages[1], QuickActionsPage):
-            return
-        page = self._pages[1]
-        if idx >= len(page.actions):
-            return
-        action = page.actions[idx]
-        log.warning("Executing quick action: %s (cmd: %s)", action.name, action.command)
-        executor = get_executor("command")
-        result = executor.execute({"command": action.command})
-        log.info("Quick action result: %s", result)
+        # Pages may opt-in to long-press via on_touch(); base impl returns None.
+        page.on_touch(TouchEvent.LONG_PRESS, x, y) if hasattr(page, 'on_touch') else None
 
     def _enqueue_touch_from_sim(self, event_type: int, x: int, y: int) -> None:
         """Called from HTTP thread by SimServer. Push to queue; main loop drains."""
@@ -230,11 +178,7 @@ class Daemon:
     def _render_current(self) -> None:
         """Render the current page to the canvas."""
         page = self._pages[self._current_page]
-        # Custom Actions supports sub-pages
-        if isinstance(page, CustomActionsPage):
-            page.render(self._canvas, subpage=self._custom_subpage)
-        else:
-            page.render(self._canvas)
+        page.render(self._canvas)
 
     def _draw_chrome(self) -> None:
         """Draw the top indicator + title (common to all pages)."""
@@ -252,15 +196,6 @@ class Daemon:
         font = get_font("default", 12)
         title = self._pages[self._current_page].title
         draw.text((6, 8), title, fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font)
-        # Sub-page indicator for Custom Actions
-        if isinstance(self._pages[self._current_page], CustomActionsPage):
-            sp = self._actions_page
-            if sp and sp.num_subpages() > 1:
-                txt = f"{self._custom_subpage + 1}/{sp.num_subpages()}"
-                font2 = get_font("mono", 10)
-                bbox = draw.textbbox((0, 0), txt, font=font2)
-                tw = bbox[2] - bbox[0]
-                draw.text((SCREEN_W - tw - 6, 8), txt, fill=(VSCodeDark.WARNING.r, VSCodeDark.WARNING.g, VSCodeDark.WARNING.b), font=font2)
 
     def _flush_to_device(self) -> None:
         """Send dirty rects to the device via v3 protocol (BEGIN + EP5 stream + END).

@@ -306,14 +306,46 @@ document.getElementById('long-press').onclick = () => {
   setTimeout(() => postTouch(2, W/2, H/2), 150);  // UP
 };
 
-// 帧拉取: 每 125ms 拉一帧 (~8fps, 与 daemon render_hz 对齐)
+// 帧拉取: 每 125ms 触发一次 (~8fps, 与 daemon render_hz 对齐)
+//
+// 关键: 不要用 `img.src = X` 轮询, 因为浏览器在新的 img.src 赋值时会
+// 丢掉/取消上一次的响应, 高延迟 (SSH 端口转发场景下 >125ms 很常见)
+// 会导致几乎所有请求都"失败"。
+//
+// 改成 fetch() + blob URL: 每个 tick 都独立发请求, 互不取消;
+// 哪个先回来就把哪个画到 canvas 上。内存里可能同时积压多个 in-flight
+// 请求, 但总流量 = 125ms / round-trip ≈ 几 KB, 可忽略。
 const img = new Image();
-img.onload = () => { ctx.drawImage(img, 0, 0, W, H); };
-function refresh() {
-  img.src = '/frame.png?t=' + Date.now();
+img.onload = () => {
+  ctx.drawImage(img, 0, 0, W, H);
+  const now = new Date();
+  lastEvt.textContent = 'frame @ ' + now.toLocaleTimeString() + '.' +
+    String(now.getMilliseconds()).padStart(3, '0');
+};
+let inFlight = 0;
+let lastBlobUrl = null;
+async function fetchFrame() {
+  const seq = ++inFlight;
+  try {
+    const r = await fetch('/frame.png?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) {
+      console.warn('frame fetch non-OK:', r.status, 'seq=' + seq);
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    // 释放上一个 blob URL, 避免泄漏. img 此时已经 onload 过了, 安全.
+    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+    lastBlobUrl = url;
+    img.src = url;
+  } catch (e) {
+    // 高延迟下 fetch 可能 reject (network error / abort);
+    // 下个 tick 会重试, 这里只打 console 不打断轮询.
+    console.warn('frame fetch failed (seq=' + seq + '):', e);
+  }
 }
-setInterval(refresh, 125);
-refresh();
+setInterval(fetchFrame, 125);
+fetchFrame();
 </script>
 </body>
 </html>

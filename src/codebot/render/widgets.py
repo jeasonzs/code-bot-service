@@ -31,6 +31,7 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
       "mono"     — DejaVu Sans Mono / JetBrains Mono (whichever is installed)
       "bold"     — DejaVu Sans Mono Bold (heavier weight, same family as "mono")
       "digital"  — DSEG7-Classic-Bold (7-segment display, bundled in fonts/)
+      "cjk"      — Noto Sans CJK SC (Simplified Chinese) for date / zh-CN labels
     """
     key = (name, size)
     if key in _font_cache:
@@ -55,6 +56,18 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
         candidates = [
             str(_FONTS_DIR / "DSEG7Classic-Bold.ttf"),
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",  # fallback
+        ]
+    elif name == "cjk":
+        # CJK font for date / Chinese labels. TTC index is ignored by
+        # Pillow's getbbox path; PIL picks the first face that has the
+        # requested glyph, so the .ttc file works as-is on Linux.
+        candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/System/Library/Fonts/PingFang.ttc",  # macOS
+            "C:\\Windows\\Fonts\\msyh.ttc",  # Windows
         ]
     else:
         candidates = []
