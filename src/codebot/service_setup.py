@@ -38,6 +38,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable
 
+from ._paths import real_user_home, resolve_codebotd
+
 
 log = logging.getLogger("codebot.service_setup")
 
@@ -82,11 +84,29 @@ def _launchd_plist_template_src() -> Path:
     )
 
 
-# Per-platform target paths
-LINUX_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
-LINUX_UNIT_FILE = LINUX_UNIT_DIR / "codebot.service"
-MAC_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
-MAC_AGENTS_FILE = MAC_AGENTS_DIR / "com.codebot.codebotd.plist"
+# Per-platform target paths.
+# Functions (NOT module constants) because Path.home() evaluated at import
+# time would freeze the path to /root when this module is imported under
+# `sudo codebotd setup` — then the unit would land in /root/.config/systemd
+# and never be enabled for the actual user.
+
+
+def _linux_unit_dir() -> Path:
+    return real_user_home() / ".config" / "systemd" / "user"
+
+
+def _linux_unit_file() -> Path:
+    return _linux_unit_dir() / "codebot.service"
+
+
+def _mac_agents_dir() -> Path:
+    return real_user_home() / "Library" / "LaunchAgents"
+
+
+def _mac_agents_file() -> Path:
+    return _mac_agents_dir() / "com.codebot.codebotd.plist"
+
+
 WIN_TASK_NAME = "CodeBot"
 
 
@@ -99,7 +119,7 @@ def _setup_service_linux(assume_yes: bool) -> int:
               file=sys.stderr)
         return 1
 
-    codebotd_path = shutil.which("codebotd")
+    codebotd_path = resolve_codebotd()
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Run `pip install --force-reinstall codebot` (or `pip install -e .` "
@@ -117,9 +137,11 @@ def _setup_service_linux(assume_yes: bool) -> int:
         "@CODEBOTD_PATH@", codebotd_path
     )
 
-    LINUX_UNIT_DIR.mkdir(parents=True, exist_ok=True)
-    LINUX_UNIT_FILE.write_text(rendered, encoding="utf-8")
-    print(f"[setup.service] Installed {LINUX_UNIT_FILE}")
+    unit_dir = _linux_unit_dir()
+    unit_file = _linux_unit_file()
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_file.write_text(rendered, encoding="utf-8")
+    print(f"[setup.service] Installed {unit_file}")
     print(f"[setup.service]   ExecStart={codebotd_path} start")
 
     try:
@@ -160,7 +182,7 @@ def _setup_service_macos(assume_yes: bool) -> int:
               file=sys.stderr)
         return 1
 
-    codebotd_path = shutil.which("codebotd")
+    codebotd_path = resolve_codebotd()
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Run `pip3 install --user codebot` (or `pip3 install codebot`).",
@@ -177,9 +199,11 @@ def _setup_service_macos(assume_yes: bool) -> int:
         "@CODEBOTD_PATH@", codebotd_path
     )
 
-    MAC_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    MAC_AGENTS_FILE.write_text(rendered, encoding="utf-8")
-    print(f"[setup.service] Installed {MAC_AGENTS_FILE}")
+    agents_dir = _mac_agents_dir()
+    agents_file = _mac_agents_file()
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    agents_file.write_text(rendered, encoding="utf-8")
+    print(f"[setup.service] Installed {agents_file}")
     print(f"[setup.service]   ProgramArguments[0]={codebotd_path}")
 
     # If the plist was loaded previously (different codebotd path), unload it
@@ -192,13 +216,13 @@ def _setup_service_macos(assume_yes: bool) -> int:
     if probe.returncode == 0:
         print(f"[setup.service] Unloading previous {label} (re-render)...")
         subprocess.run(
-            ["launchctl", "unload", "-w", str(MAC_AGENTS_FILE)],
+            ["launchctl", "unload", "-w", str(agents_file)],
             capture_output=True, check=False,
         )
 
     try:
         subprocess.run(
-            ["launchctl", "load", "-w", str(MAC_AGENTS_FILE)],
+            ["launchctl", "load", "-w", str(agents_file)],
             check=True, capture_output=True,
         )
     except subprocess.CalledProcessError as e:
@@ -224,7 +248,7 @@ def _mac_uid() -> str:
 # Windows: Task Scheduler per-user task
 # ==============================================================
 def _setup_service_windows(assume_yes: bool) -> int:
-    codebotd_path = shutil.which("codebotd")
+    codebotd_path = resolve_codebotd()
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Reinstall: `pip install --force-reinstall codebot`.",
@@ -293,12 +317,13 @@ def _teardown_service_linux(assume_yes: bool) -> int:
         capture_output=True, check=False,
     )
     removed = False
-    if LINUX_UNIT_FILE.exists():
+    unit_file = _linux_unit_file()
+    if unit_file.exists():
         try:
-            LINUX_UNIT_FILE.unlink()
+            unit_file.unlink()
             removed = True
         except OSError as e:
-            print(f"[teardown.service] ERROR: cannot remove {LINUX_UNIT_FILE}: {e}",
+            print(f"[teardown.service] ERROR: cannot remove {unit_file}: {e}",
                   file=sys.stderr)
             return 1
     subprocess.run(
@@ -306,7 +331,7 @@ def _teardown_service_linux(assume_yes: bool) -> int:
         capture_output=True, check=False,
     )
     if removed:
-        print(f"[teardown.service] Removed {LINUX_UNIT_FILE}")
+        print(f"[teardown.service] Removed {unit_file}")
     else:
         print("[teardown.service] No systemd user unit to remove.")
     return 0
@@ -316,17 +341,18 @@ def _teardown_service_macos(assume_yes: bool) -> int:
     """Unload + remove the LaunchAgent."""
     if shutil.which("launchctl") is None:
         return 0
+    agents_file = _mac_agents_file()
     # Best-effort unload (ignore non-zero — agent might already be gone).
     subprocess.run(
-        ["launchctl", "unload", "-w", str(MAC_AGENTS_FILE)],
+        ["launchctl", "unload", "-w", str(agents_file)],
         capture_output=True, check=False,
     )
-    if MAC_AGENTS_FILE.exists():
+    if agents_file.exists():
         try:
-            MAC_AGENTS_FILE.unlink()
-            print(f"[teardown.service] Removed {MAC_AGENTS_FILE}")
+            agents_file.unlink()
+            print(f"[teardown.service] Removed {agents_file}")
         except OSError as e:
-            print(f"[teardown.service] ERROR: cannot remove {MAC_AGENTS_FILE}: {e}",
+            print(f"[teardown.service] ERROR: cannot remove {agents_file}: {e}",
                   file=sys.stderr)
             return 1
     else:

@@ -58,7 +58,8 @@ python3 -m pip install codebot
 pip install codebot
 
 # 2. 一条命令搞定所有平台相关的安装（驱动 + 自启 + Claude 集成）
-codebotd setup                       # 默认非交互；sudo / 管理员按提示
+sudo codebotd setup                  # Linux/macOS 推荐 sudo（udev 需 root）
+                                     # Windows 用管理员 PowerShell 同理
 #   或 CI / Docker:
 codebotd setup --doctor-only         # 只验证环境，不动任何东西
 
@@ -78,6 +79,11 @@ pip uninstall codebot                # 单独卸载 Python 包
 - **Linux**：装 udev 规则 + 注册 systemd 用户级 unit（用户登录自启）
 - **macOS**：TCC 提示 + 写 `~/Library/LaunchAgents/com.codebot.codebotd.plist` + `launchctl load -w`
 - **Windows**：装 WinUSB INF（管理员） + 注册 Task Scheduler 任务（onlogon）
+
+整个进程跑在 `sudo` 下时，user-scope 写入（systemd unit / plist / Claude
+集成）仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），不会写到
+`/root`。所以 Linux 推荐 `sudo codebotd setup`，而不是只把 `--user` 装 pip
+包那一步 sudo 一下。
 
 幂等。再跑一次不会出错。
 

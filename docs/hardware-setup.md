@@ -65,6 +65,10 @@ sudo codebotd setup
    `ExecStart=` 自动填入 `which codebotd` 解析到的绝对路径
 4. 提示 `sudo usermod -aG plugdev $USER`（可选，登录后生效）
 
+> **整个进程跑在 sudo 下**——phase 3 / 4 的 systemd unit、Claude 集成等
+> user-scope 写入仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），
+> 不会写到 `/root` 下。这是 `codebotd setup` 默认推荐 sudo 跑的原因。
+
 如果用 `codebotd setup`（无 sudo）会装到 `~/.config/udev/rules.d/`，
 只在 user session manager 加载时生效。推荐 sudo。
 

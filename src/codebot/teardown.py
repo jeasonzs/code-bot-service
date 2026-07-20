@@ -26,6 +26,7 @@ Return codes (POSIX convention):
 
 from __future__ import annotations
 
+import os
 import sys
 
 
@@ -41,7 +42,9 @@ def run_teardown(*, assume_yes: bool = True) -> int:
     from . import driver_setup, service_setup
     from .claude_integration import install as claude_install
 
-    print(f"[teardown] platform={sys.platform} assume_yes={assume_yes}")
+    sudo_user = os.environ.get("SUDO_USER")
+    scope = f"user={sudo_user}" if sudo_user else f"euid={os.geteuid()}"
+    print(f"[teardown] platform={sys.platform} {scope} assume_yes={assume_yes}")
     print()
 
     rc = 0

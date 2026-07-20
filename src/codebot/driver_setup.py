@@ -34,6 +34,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable
 
+from ._paths import real_user_home
+
 
 log = logging.getLogger("codebot.driver_setup")
 
@@ -81,7 +83,7 @@ def _setup_linux(assume_yes: bool) -> int:
         return 2
 
     target_root = Path("/etc/udev/rules.d/99-codebot.rules")
-    target_user = Path.home() / ".config/udev/rules.d/99-codebot.rules"
+    target_user = real_user_home() / ".config/udev/rules.d/99-codebot.rules"
 
     if os.geteuid() == 0:
         target_root.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +237,7 @@ def _teardown_linux(assume_yes: bool) -> int:
     """Remove udev rule files at both system and user paths, then reload udev."""
     targets = [
         Path("/etc/udev/rules.d/99-codebot.rules"),
-        Path.home() / ".config/udev/rules.d/99-codebot.rules",
+        real_user_home() / ".config/udev/rules.d/99-codebot.rules",
     ]
     rc = 0
     for p in targets:
