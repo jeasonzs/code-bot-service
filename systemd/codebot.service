@@ -1,0 +1,24 @@
+[Unit]
+Description=Code Bot USB info display daemon (CH32X033F8P6)
+Documentation=https://github.com/code-bot/code-bot-service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Foreground mode is default since the daemon now handles its own PID file
+# + control port; ``--foreground`` is implicit.
+ExecStart=%h/.local/bin/codebotd start
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (defense in depth)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

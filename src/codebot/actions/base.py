@@ -33,7 +33,21 @@ class ActionExecutor(ABC):
 
 
 class CommandExecutor(ActionExecutor):
-    """Execute a shell command (bash/zsh/powershell/cmd)."""
+    """Execute a shell command.
+
+    IMPORTANT — cross-platform semantics:
+      - Windows: ``shell=True`` invokes **PowerShell** (``powershell``).
+        Commands MUST be valid PowerShell syntax. Bash-only constructs
+        (e.g. ``ls | grep``, ``$VAR``, ``2>&1``) will fail.
+      - macOS / Linux: ``bash`` is the default shell. macOS 10.15+
+        defaults user shell to zsh, but bash is still on PATH and our
+        commands are intentionally POSIX-portable.
+
+    For launching a desktop application cross-platform, prefer
+    ``open_app`` (``OpenAppExecutor``); for opening URLs / files,
+    ``xdg-open`` / ``open`` / Windows file association is the right
+    primitive (use ``command`` action with the platform-specific tool).
+    """
 
     def __init__(self, shell: str = "bash") -> None:
         # Auto-detect shell
@@ -65,7 +79,25 @@ class CommandExecutor(ActionExecutor):
 
 
 class OpenAppExecutor(ActionExecutor):
-    """Open an application."""
+    """Launch a desktop application by name (cross-platform).
+
+    The ``app`` config value should be the *executable name* (resolved via
+    the platform's PATH / launcher), not a URL or document path.
+
+      - **macOS**: ``open -a <app>`` (Launch Services)
+      - **Windows**: ``Popen([app])`` — Windows ``CreateProcess`` resolves
+        ``app`` against PATH + .exe extension. For apps not on PATH, pass
+        an absolute path or ``shell:Application\\app.exe`` shortcut.
+        (Previously used ``start <app>`` via cmd.exe — that opens
+        *documents/URLs*, not applications; removed in P2.3.)
+      - **Linux**: ``Popen([app])`` — runs the executable directly via
+        PATH lookup. The previous ``xdg-open`` was misleading because
+        ``xdg-open`` is for URLs/files, not launching binaries.
+
+    For URLs / files / documents, use the ``command`` action with the
+    platform's appropriate opener (``xdg-open`` / ``open`` /
+    Windows file association via ``start``).
+    """
 
     def execute(self, config: dict) -> ActionResult:
         app = config.get("app")
@@ -75,9 +107,9 @@ class OpenAppExecutor(ActionExecutor):
             if sys.platform == "darwin":
                 subprocess.Popen(["open", "-a", app])
             elif sys.platform == "win32":
-                subprocess.Popen(["start", app], shell=True)
+                subprocess.Popen([app])  # CreateProcess resolves PATH + .exe
             else:  # Linux
-                subprocess.Popen(["xdg-open", app])
+                subprocess.Popen([app])  # direct exec; PATH lookup
             return ActionResult(True, f"opened {app}")
         except Exception as e:
             return ActionResult(False, str(e))

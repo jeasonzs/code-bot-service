@@ -16,6 +16,8 @@ Kinds backed by primitives: terminal, fan.
 
 from __future__ import annotations
 
+import logging
+from importlib.resources import files
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -25,18 +27,43 @@ from .theme import Color
 from .widgets import get_font
 
 
-# Project icons directory (sibling of fonts/).
-_ICONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "icons"
+log = logging.getLogger("codebot.render.icons")
+
+
+# Project icons directory (Traversable via importlib.resources).
+# 跟随 wheel 安装; 4 层 parent×4 只在 -e 模式指向 <repo>/icons/.
+_ICONS_DIR = files("codebot") / "icons"
 
 # Cache: name -> PIL Image (the original 50x50 RGBA source).
 _bitmap_cache: dict[str, Image.Image] = {}
 
+# 1×1 transparent placeholder used when a bitmap file is missing.
+_BITMAP_MISSING = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+
 
 def _load_bitmap(name: str) -> Image.Image:
-    """Load a bitmap icon from icons/<name>.png (cached)."""
+    """Load a bitmap icon from icons/<name>.png (cached).
+
+    在 _ICONS_DIR 不存在或文件缺失时返回 1×1 透明占位 + log.warning,
+    不抛 FileNotFoundError, 让 UI 降级而非崩溃。
+    """
     if name not in _bitmap_cache:
         path = _ICONS_DIR / (name + ".png")
-        _bitmap_cache[name] = Image.open(path).convert("RGBA")
+        try:
+            # Traversable.is_file() 检查存在; zip-installed wheel 下也 OK.
+            if not path.is_file():
+                log.warning("icon %r not found at %s; using placeholder", name, path)
+                _bitmap_cache[name] = _BITMAP_MISSING
+            else:
+                try:
+                    _bitmap_cache[name] = Image.open(str(path)).convert("RGBA")
+                except (FileNotFoundError, OSError) as e:
+                    log.warning("icon %r load failed (%s); using placeholder", name, e)
+                    _bitmap_cache[name] = _BITMAP_MISSING
+        except OSError as e:
+            # Traversable 在 zip wheel 失败时 (e.g. 系统级 IOError)
+            log.warning("icons dir access failed (%s); using placeholder for %r", e, name)
+            _bitmap_cache[name] = _BITMAP_MISSING
     return _bitmap_cache[name]
 
 
@@ -309,7 +336,11 @@ def draw_icon(
     # Bitmap path: prefer PNG if present and not in the primitive-only set
     primitive_only = ("terminal", "fan", "thermo", "net")
     bitmap_path = _ICONS_DIR / (kind + ".png")
-    if kind not in primitive_only and bitmap_path.exists():
+    try:
+        bitmap_exists = bitmap_path.is_file()
+    except OSError:
+        bitmap_exists = False
+    if kind not in primitive_only and bitmap_exists:
         _draw_bitmap(canvas, kind, x, y, size)
         return
 

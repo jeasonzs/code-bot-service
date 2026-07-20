@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.codebot.codebotd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/codebotd</string>
+        <string>start</string>
+    </array>
+
+    <!-- Run when user logs in (Aqua session, not SSH). -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Throttle restarts: max 10 in any 60s window. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StartInterval</key>
+    <integer>5</integer>
+
+    <!-- Stdout/stderr to unified log. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/com.codebot.codebotd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.codebot.codebotd.err.log</string>
+
+    <!-- Process type: agent (user-level, no root). -->
+    <key>ProcessType</key>
+    <string>Agent</string>
+</dict>
+</plist>

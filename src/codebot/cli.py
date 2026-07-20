@@ -1,8 +1,10 @@
 """Command-line interface for codebotd."""
 
+import os
 import sys
 import click
 from .daemon import run_daemon
+from .doctor import run_doctor
 from . import __version__
 
 
@@ -17,24 +19,130 @@ def cli():
 @click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize)")
 @click.option("--config", "-c", type=click.Path(), default=None, help="Config file path")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-@click.option("--sim", is_flag=True, help="Simulation mode: no USB device, render to browser")
-@click.option("--sim-port", type=int, default=8080, help="HTTP port for sim mode (default 8080)")
-def start(foreground: bool, config: str | None, verbose: bool, sim: bool, sim_port: int):
-    """Start the codebotd daemon."""
+@click.option("--sim-port", type=int, default=8080,
+              help="HTTP port for the browser sim (default 8080). "
+                   "Sim channel is always on; USB channel is started when a device is found.")
+def start(foreground: bool, config: str | None, verbose: bool, sim_port: int):
+    """Start the codebotd daemon.
+
+    The daemon always serves the browser sim (debug channel). When a Code Bot
+    device (VID=0x1A86 PID=0xCB0B) is detected on USB, the same frames are
+    also pushed to the device. If no device is found, the daemon continues
+    running in sim-only mode (warning logged, no exit).
+    """
     run_daemon(foreground=foreground, config_path=config, verbose=verbose,
-               sim=sim, sim_port=sim_port)
+               sim_port=sim_port)
 
 
 @cli.command()
-def stop():
-    """Stop the running codebotd daemon."""
-    click.echo("stop: TODO - send SIGTERM to PID file")
+def doctor():
+    """Run environment diagnostics (Python / deps / libusb / USB device)."""
+    sys.exit(run_doctor())
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Non-interactive (assume yes for sudo / UAC)")
+def setup_driver(yes: bool):
+    """Install the OS-level USB driver / permissions for the Code Bot device.
+
+    Three platforms:
+
+      * Linux:  copies udev/99-codebot.rules to /etc/udev/rules.d/ (needs sudo),
+                reloads udev, prints hint about adding user to plugdev group.
+      * macOS:  no driver install needed (pyusb uses IOKit); prompts the user
+                to allow the device on first plug-in (TCC prompt).
+      * Windows: installs windows/codebot-inface0.inf via pnputil (needs
+                 Administrator), binding interface 0 (Vendor) to WinUSB while
+                 leaving interface 1 (HID Keyboard) on the system default.
+
+    Returns 0 on success, 1 if user action is required (sudo / UAC), 2 on
+    fatal error. Always runs `doctor` first to surface environment issues.
+    """
+    from .driver_setup import run_setup
+    sys.exit(run_setup(assume_yes=yes))
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True,
+              help="Non-interactive (no prompt before overwriting settings.json)")
+def install_claude(yes: bool):
+    """Install Claude Code statusline + 8 lifecycle hooks.
+
+    Merges ``statusLine`` + ``hooks`` blocks into ``~/.claude/settings.json``
+    (cross-platform: ``Path.home() / .claude / settings.json``) so the LCD
+    Claude page shows the live Claude Code status. Hook commands reference
+    the console_scripts entry points ``codebot-claude-statusline`` /
+    ``codebot-claude-status-hook`` (installed on PATH by ``pip install
+    codebot``), so no shell wrapper is needed and Windows works without
+    Git Bash.
+
+    Idempotent: re-running overwrites both blocks but preserves every other
+    key (e.g. ``mcpServers``, ``permissions``) and backs up the previous
+    settings to ``~/.claude/backups/settings.json.<TS>.bak``.
+    """
+    from .claude_integration.install import run_install
+    sys.exit(run_install(assume_yes=yes))
+
+
+@cli.command()
+@click.option("--timeout", type=float, default=5.0,
+              help="Timeout (seconds) for STOP ack from daemon (default 5)")
+def stop(timeout: float):
+    """Stop the running codebotd daemon (cross-platform).
+
+    Reads the PID file written by `codebotd start`, verifies the daemon
+    process is alive, and sends `STOP` over the loopback control port.
+    Falls back to SIGTERM on POSIX if the control port is unreachable.
+    """
+    from . import ipc
+    running, info = ipc.is_daemon_running()
+    if not running:
+        click.echo("codebotd is not running.", err=True)
+        sys.exit(1)
+
+    click.echo(f"codebotd pid={info['pid']} control_port={info['control_port']} "
+               f"sim_port={info['sim_port']}")
+
+    ok, msg = ipc.send_stop(timeout=timeout)
+    if ok:
+        click.echo(f"  ✓ {msg}")
+        return
+    click.echo(f"  ! {msg}", err=True)
+    # Fallback: SIGTERM on POSIX
+    if sys.platform != "win32":
+        click.echo("  Falling back to SIGTERM…")
+        try:
+            os.kill(info["pid"], 15)  # SIGTERM
+            click.echo("  ✓ SIGTERM sent")
+            return
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            click.echo(f"  ! SIGTERM failed: {e}", err=True)
+    sys.exit(1)
 
 
 @cli.command()
 def status():
-    """Show codebotd status."""
-    click.echo("status: TODO - check PID file and USB device")
+    """Show codebotd status (PID, control port, sim port, USB device)."""
+    from . import ipc
+    running, info = ipc.is_daemon_running()
+    if not running:
+        click.echo("codebotd is not running.")
+        sys.exit(1)
+
+    click.echo(f"  PID:          {info['pid']}")
+    click.echo(f"  Control port: {info['control_port']}")
+    click.echo(f"  Sim port:     {info['sim_port']}")
+    # USB device scan: live check
+    try:
+        from .transport.usb import UsbTransport
+        dev = UsbTransport().find()
+        if dev is None:
+            click.echo("  USB device:   not found (sim-only mode)")
+        else:
+            click.echo(f"  USB device:   bus={dev.bus} addr={dev.address} "
+                       f"serial={dev.serial or 'n/a'}")
+    except Exception as e:
+        click.echo(f"  USB device:   probe failed: {e}", err=True)
 
 
 @cli.command()

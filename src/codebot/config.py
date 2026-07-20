@@ -143,7 +143,9 @@ class Config:
     def _read_yaml(self) -> Optional[dict]:
         try:
             import yaml  # PyYAML is a project dep
-            with open(self._path, "r", encoding="utf-8") as f:
+            # newline="" 让 Python 不做 universal-newline 翻译,
+            # CRLF 在 Windows 上保持原样交给 PyYAML (它内部处理).
+            with open(self._path, "r", encoding="utf-8", newline="") as f:
                 return yaml.safe_load(f)
         except FileNotFoundError:
             return None
@@ -172,7 +174,9 @@ class Config:
         # os.replace() to be atomic on POSIX.
         tmp = self._path.with_name(self._path.name + ".tmp")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            # newline="" 让 yaml 控制换行符 (默认 LF),
+            # 避免 Windows 上 Python 默认加 \r\n 干扰跨平台一致性.
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
                 yaml.safe_dump(
                     data, f,
                     default_flow_style=False,

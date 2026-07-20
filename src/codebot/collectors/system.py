@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import psutil
 import time
 import threading
@@ -69,7 +70,9 @@ class SystemCollector:
     def _sample(self) -> None:
         cpu_pct = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
+        # 跨平台: 硬编码 "/" 在 Windows 下 ValueError; 用 os.sep 让 psutil 自动
+        # 选平台相关根 (Linux/macOS: "/", Windows: "C:\\")
+        disk = psutil.disk_usage(os.path.abspath(os.sep))
         net = psutil.net_io_counters()
         now = time.time()
         elapsed = now - self._last_time if self._last_time else 1.0

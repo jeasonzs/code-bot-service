@@ -13,18 +13,113 @@ Device exposes exactly two interfaces:
 There is NO CDC ACM interface. Debug logging on the device side goes to
 USART3 (PC18/PC19) on the MCU, not over USB. Host-side debug info comes
 via the Vendor IN pipe (CMD_LOG frames).
+
+P3.3 libusb loader: per-platform native library resolution.
+
+  Linux:  ctypes.util.find_library('usb-1.0') — relies on system package
+          libusb-1.0-0 (Debian/Ubuntu), libusb (Fedora), libusb (Alpine).
+          On startup failure, raise RuntimeError with platform-specific
+          package install hint.
+  macOS:  no libusb required — pyusb 1.x uses Apple's IOKit framework
+          via ctypes; nothing to load.
+  Windows: vendor libusb-1.0.dll from codebot._vendor.libusb (fallback
+           when WinUSB backend is not available); primary path is the
+           WinUSB driver bound by `codebotd setup-driver`.
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import logging
+import os
+import struct
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Optional
 
-import usb.core
-import usb.util
-
 from ..protocol import Cmd, Frame, TouchReport
+
+# pyusb is imported lazily so we can give platform-specific guidance when
+# it's missing instead of a bare ModuleNotFoundError.
+usb_core = None
+usb_util = None
+_IMPORT_ERROR: Exception | None = None
+try:
+    import usb.core as _uc
+    import usb.util as _uu
+    usb_core = _uc
+    usb_util = _uu
+except ImportError as _e:
+    _IMPORT_ERROR = _e
+
+
+log = logging.getLogger("codebot.transport.usb")
+
+
+def _load_libusb_native() -> None:
+    """Resolve and load the native libusb library, per platform.
+
+    Linux:  system libusb-1.0.so.0 via ctypes.util.find_library.
+    macOS:  no-op (pyusb uses IOKit).
+    Windows: codebot._vendor.libusb/windows-{arch}/libusb-1.0.dll via
+             os.add_dll_directory; failure is non-fatal (WinUSB fallback).
+
+    Raises:
+        RuntimeError: on Linux when system libusb is not installed.
+    """
+    if sys.platform == "darwin":
+        log.debug("libusb not required on macOS (pyusb uses IOKit)")
+        return
+
+    if sys.platform.startswith("linux"):
+        so_name = ctypes.util.find_library("usb-1.0")
+        if not so_name:
+            raise RuntimeError(
+                "libusb-1.0 not found on this system. Install the system package:\n"
+                "  Debian/Ubuntu: sudo apt install libusb-1.0-0\n"
+                "  Fedora/RHEL:   sudo dnf install libusb\n"
+                "  Arch:          sudo pacman -S libusb\n"
+                "  Alpine:        sudo apk add libusb\n"
+                "Or run: codebotd setup-driver"
+            )
+        try:
+            ctypes.CDLL(so_name)
+            log.debug("loaded native libusb: %s", so_name)
+        except OSError as e:
+            raise RuntimeError(
+                f"libusb-1.0 found at {so_name} but failed to load: {e}"
+            ) from e
+        return
+
+    if sys.platform == "win32":
+        # Vendor .dll fallback — primary path on Windows is WinUSB which
+        # does not need libusb-1.0.dll at all.
+        try:
+            from importlib.resources import files
+            vendor = files("codebot._vendor.libusb")
+            arch = "windows-x86_64" if struct.calcsize("P") == 8 else "windows-x86"
+            dll_path = str(vendor / arch / "libusb-1.0.dll")
+            os.add_dll_directory(os.path.dirname(dll_path))
+            ctypes.CDLL(dll_path)
+            log.debug("loaded vendor libusb: %s", dll_path)
+        except (ImportError, OSError, FileNotFoundError) as e:
+            # Not fatal: WinUSB backend (the default after setup-driver)
+            # does not need libusb.dll.
+            log.debug("vendor libusb dll not loaded (%s); WinUSB backend OK", e)
+        return
+
+    log.debug("libusb loader: platform %s untested, skipping", sys.platform)
+
+
+# Load native libusb on module import. On Linux, missing libusb raises a
+# clear RuntimeError instead of letting pyusb crash with NoBackendError.
+if _IMPORT_ERROR is not None:
+    raise RuntimeError(
+        "pyusb is not installed. Install with: pip install codebot[usb]"
+    ) from _IMPORT_ERROR
+_load_libusb_native()
 
 
 # Code Bot interfaces exposed by the firmware
@@ -41,8 +136,8 @@ def _safe_get_string(dev, index: int) -> Optional[str]:
     if not index:
         return None
     try:
-        return usb.util.get_string(dev, index)
-    except (usb.core.USBError, ValueError, NotImplementedError):
+        return usb_util.get_string(dev, index)
+    except (usb_core.USBError, ValueError, NotImplementedError):
         return None
 
 
@@ -79,7 +174,7 @@ class UsbTransport:
         self.pid = pid
         self._backend = backend
 
-        self._dev: Optional[usb.core.Device] = None
+        self._dev: Optional[usb_core.Device] = None
         self._ep_out = None  # 0x01 OUT: Vendor bulk OUT  (H→D control commands)
         self._ep_in = None   # 0x82 IN:  Vendor bulk IN   (D→H response frames)
         self._ep_data = None # 0x05 OUT: Vendor bulk OUT  (H→D image data stream)
@@ -92,7 +187,7 @@ class UsbTransport:
     # ----- Discovery -----
     def find(self) -> Optional[DeviceInfo]:
         """Find Code Bot device by VID/PID."""
-        dev = usb.core.find(
+        dev = usb_core.find(
             idVendor=self.vid,
             idProduct=self.pid,
             backend=self._backend,
@@ -104,7 +199,7 @@ class UsbTransport:
     def list_all(self) -> list[DeviceInfo]:
         """List all Code Bot devices on USB bus."""
         results: list[DeviceInfo] = []
-        for dev in usb.core.find(
+        for dev in usb_core.find(
             find_all=True,
             idVendor=self.vid,
             idProduct=self.pid,
@@ -116,7 +211,7 @@ class UsbTransport:
     # ----- Open/close -----
     def open(self) -> bool:
         """Open device, claim interfaces 0 (Vendor) and 1 (HID), wire up endpoints."""
-        self._dev = usb.core.find(
+        self._dev = usb_core.find(
             idVendor=self.vid,
             idProduct=self.pid,
             backend=self._backend,
@@ -129,25 +224,25 @@ class UsbTransport:
             try:
                 if self._dev.is_kernel_driver_active(iface):
                     self._dev.detach_kernel_driver(iface)
-            except (NotImplementedError, usb.core.USBError):
+            except (NotImplementedError, usb_core.USBError):
                 pass
 
         # Set configuration (idempotent)
         try:
             self._dev.set_configuration()
-        except usb.core.USBError:
+        except usb_core.USBError:
             pass
 
         # Claim Vendor + HID interfaces
         for iface in (VENDOR_INTERFACE, HID_INTERFACE):
             try:
-                usb.util.claim_interface(self._dev, iface)
-            except usb.core.USBError:
+                usb_util.claim_interface(self._dev, iface)
+            except usb_core.USBError:
                 try:
                     if self._dev.is_kernel_driver_active(iface):
                         self._dev.detach_kernel_driver(iface)
-                    usb.util.claim_interface(self._dev, iface)
-                except (NotImplementedError, usb.core.USBError):
+                    usb_util.claim_interface(self._dev, iface)
+                except (NotImplementedError, usb_core.USBError):
                     pass
 
         # Wire up endpoints by address
@@ -161,7 +256,7 @@ class UsbTransport:
             elif addr == 0x05:
                 self._ep_data = ep
         for ep in cfg[(HID_INTERFACE, 0)]:
-            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
+            if usb_util.endpoint_direction(ep.bEndpointAddress) == usb_util.ENDPOINT_IN:
                 self._ep_hid = ep
         return True
 
@@ -170,12 +265,12 @@ class UsbTransport:
         if self._dev is not None:
             for iface in (VENDOR_INTERFACE, HID_INTERFACE):
                 try:
-                    usb.util.release_interface(self._dev, iface)
-                except usb.core.USBError:
+                    usb_util.release_interface(self._dev, iface)
+                except usb_core.USBError:
                     pass
             try:
-                usb.util.dispose_resources(self._dev)
-            except usb.core.USBError:
+                usb_util.dispose_resources(self._dev)
+            except usb_core.USBError:
                 pass
             self._dev = None
             self._ep_out = None
@@ -199,16 +294,16 @@ class UsbTransport:
             try:
                 self._ep_out.write(data, timeout=timeout)
                 return True
-            except usb.core.USBError as e:
+            except usb_core.USBError as e:
                 if e.errno in (None, 5, 19, 32) or "Pipe" in str(e) or "timed out" in str(e).lower():
                     try:
                         self._ep_out.clear_halt()
-                    except usb.core.USBError:
+                    except usb_core.USBError:
                         return False
                     try:
                         self._ep_out.write(data, timeout=timeout)
                         return True
-                    except usb.core.USBError:
+                    except usb_core.USBError:
                         return False
                 return False
 
@@ -234,7 +329,7 @@ class UsbTransport:
             try:
                 self._ep_data.write(data, timeout=1000)
                 written += len(data)
-            except usb.core.USBError:
+            except usb_core.USBError:
                 return written
         return written
 
@@ -254,7 +349,7 @@ class UsbTransport:
             try:
                 self._ep_hid.write(report, timeout=timeout)
                 return True
-            except usb.core.USBError:
+            except usb_core.USBError:
                 return False
 
     # ----- Receive (EP2 IN) -----
@@ -268,9 +363,9 @@ class UsbTransport:
             return []
         try:
             data = self._ep_in.read(64, timeout=timeout_ms)
-        except usb.core.USBTimeoutError:
+        except usb_core.USBTimeoutError:
             return []
-        except usb.core.USBError:
+        except usb_core.USBError:
             return []
 
         if not data:

@@ -8,10 +8,14 @@ version = "0.17"
 description = "Code Bot - USB info display host daemon for CH32X033F8P6"
 authors = [{name = "Code Bot Project"}]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = {text = "MIT"}
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
@@ -22,6 +26,7 @@ dependencies = [
     "Pillow>=10.0.0",
     "PyYAML>=6.0",
     "click>=8.1.0",
+    "platformdirs>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -34,12 +39,26 @@ dev = [
 
 [project.scripts]
 codebotd = "codebot.cli:main"
+# Console scripts that Claude Code invokes from its hook configuration.
+# Available on PATH after `pip install codebot` on every platform
+# (Windows / macOS / Linux). Claude Code's hook.command runs in the
+# system shell which searches PATH, so we never hardcode a path here.
+codebot-claude-statusline = "codebot.claude_integration.statusline:main"
+codebot-claude-status-hook = "codebot.claude_integration.hook:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-codebot = ["py.typed"]
+codebot = [
+    "py.typed",
+    "fonts/*.ttf",
+    "icons/*.png",
+    "udev/*.rules",
+    "windows/*.inf",
+    # P3.3: Windows vendor libusb.dll (fallback when WinUSB unavailable)
+    "_vendor/libusb/windows-*/*.dll",
+]
 
 [tool.black]
 line-length = 100

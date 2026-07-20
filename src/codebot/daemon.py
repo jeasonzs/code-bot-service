@@ -8,12 +8,14 @@ from __future__ import annotations
 import queue
 import signal
 import sys
+import os
 import time
 import logging
 import threading
 from pathlib import Path
 from typing import Optional
 
+from . import ipc
 from .transport.usb import UsbTransport
 from .protocol import (
     Frame, TouchEvent, Cmd,
@@ -58,9 +60,12 @@ class Daemon:
     """Main daemon that owns the USB transport (or sim server) and render loop."""
 
     def __init__(self, config_path: Optional[str] = None, verbose: bool = False,
-                 sim: bool = False, sim_port: int = 8080) -> None:
+                 sim_port: int = 8080) -> None:
+        # P3.2: sim is always on (debug channel); USB is opened when device
+        # is found. No more `--sim` opt-in; daemon always serves both
+        # channels (or sim-only if USB device is missing).
         self.verbose = verbose
-        self.sim = sim
+        self.sim_port = sim_port
         self._stop = threading.Event()
         self._canvas = Canvas()
         self._pages = make_pages()
@@ -99,14 +104,13 @@ class Daemon:
         # 主循环统一 drain → _handle_touch, 避免 _handle_touch 跨线程调用
         self._touch_queue: queue.Queue = queue.Queue()
 
-        if self.sim:
-            from .sim import SimServer  # avoid hard dep when USB-only
-            self._sim = SimServer(port=sim_port, width=SCREEN_W, height=SCREEN_H)
-            self._sim.set_touch_callback(self._enqueue_touch_from_sim)
-            self._usb = None
-        else:
-            self._usb = UsbTransport()
-            self._sim = None
+        # P3.2: dual-fan architecture — both channels always started.
+        # USB.open() is attempted lazily in run(); if device missing, sim
+        # still serves the user.
+        from .sim import SimServer
+        self._sim = SimServer(port=sim_port, width=SCREEN_W, height=SCREEN_H)
+        self._sim.set_touch_callback(self._enqueue_touch_from_sim)
+        self._usb = UsbTransport()
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self.verbose else logging.INFO
@@ -117,10 +121,16 @@ class Daemon:
         )
 
     def _find_and_open(self) -> bool:
-        """Find device and open USB."""
+        """Find device and open USB.
+
+        P3.2: kept short (3 retries × 0.5s) so a missing device doesn't
+        delay daemon startup in sim-only mode. The previous 10×1s = 10s
+        startup penalty was hostile to dev workflows where the device is
+        unplugged most of the time.
+        """
         log.info("Searching for Code Bot device (VID=0x%04x PID=0x%04x)...",
                  self._usb.vid, self._usb.pid)
-        for _ in range(10):  # retry up to 10 times (1 sec each)
+        for attempt in range(3):
             info = self._usb.find()
             if info is not None:
                 log.info("Found device: bus=%d addr=%d serial=%s",
@@ -129,7 +139,8 @@ class Daemon:
                     log.info("USB device opened")
                     return True
                 log.warning("Device found but open() failed")
-            time.sleep(1.0)
+            if attempt < 2:
+                time.sleep(0.5)
         return False
 
     def _handle_touch(self, event_type: int, x: int, y: int) -> None:
@@ -263,14 +274,19 @@ class Daemon:
                 log.info("[firmware] %s", f.payload.decode("utf-8", errors="replace"))
 
     def _render_loop(self) -> None:
-        """Main render loop: render, draw chrome, push to device or sim."""
+        """Render the current page and fan out to sim + USB channels.
+
+        Both channels are pushed independently — if USB is not open, only
+        sim receives the frame; if USB is open, both sim (browser) and the
+        device see the same frame. Channels never block each other.
+        """
         self._render_current()
         if not self._pages[self._current_page].skip_chrome:
             self._draw_chrome()
-        if self.sim:
-            # sim: 直接 publish full frame (Pillow Image), SimServer 处理锁
-            self._sim.update_image(self._canvas.image)
-        else:
+        # sim 总是推 (browser 调试通道常驻)
+        self._sim.update_image(self._canvas.image)
+        # USB 仅在设备真连上时推
+        if self._usb.is_open:
             self._flush_to_device()
 
     def _stop_handler(self, signum, frame) -> None:
@@ -281,24 +297,51 @@ class Daemon:
         """Run the daemon (blocks until stopped)."""
         self._setup_logging()
         # signal.signal 只在主线程有效; 测试/嵌入场景下被调用者手动管 stop event
+        # SIGTERM 在 Windows 上不存在 (signal.SIGTERM AttributeError);
+        # 在主线程外/嵌入式 Python 下注册会抛 ValueError。
+        # 这里放宽到 (AttributeError, ValueError, OSError), 所有平台都安全。
         try:
             signal.signal(signal.SIGINT, self._stop_handler)
-            signal.signal(signal.SIGTERM, self._stop_handler)
-        except ValueError:
+        except (AttributeError, ValueError, OSError):
             pass
+        if os.name != "nt" and hasattr(signal, "SIGTERM"):
+            try:
+                signal.signal(signal.SIGTERM, self._stop_handler)
+            except (AttributeError, ValueError, OSError):
+                pass
 
-        if self.sim:
-            log.info("Starting in SIMULATION mode (no USB device required)")
-            self._sim.start()
-            log.info("Open http://127.0.0.1:%d in a browser to view", self._sim.port)
+        # P4.1: write PID file + start loopback control server (cross-platform
+        # stop/status channel; replaces "send SIGTERM" plan that didn't work
+        # on Windows).
+        control = ipc.ControlServer(on_stop=self._stop.set)
+        if control.start():
+            ipc.write_pid_file(
+                pid=os.getpid(),
+                control_port=control.port,
+                sim_port=self._sim.port,
+            )
+            log.info("PID file: %s", ipc.pid_file_path())
+            log.info("Control channel: 127.0.0.1:%d (send 'STOP' to shut down)",
+                     control.port)
         else:
-            if not self._find_and_open():
-                log.error("Could not find/open Code Bot device")
-                return
+            log.warning("PID file / control channel unavailable; "
+                        "use Ctrl+C / task manager to stop")
+
+        # P3.2: sim always starts; USB opens if device found, else sim-only.
+        self._sim.start()
+        log.info("Sim HTTP server: http://127.0.0.1:%d (always on)", self._sim.port)
+        if self._find_and_open():
+            log.info("USB device opened; dual-fan mode active (sim + device)")
             # Send initial brightness + clear
             self._usb.send_frame(build_set_brightness(80))
             time.sleep(0.1)
             self._usb.send_frame(build_clear(0x0000))
+        else:
+            log.warning(
+                "Code Bot USB device not found; running in sim-only mode. "
+                "Plug in the device and restart, or run `codebotd setup-driver` "
+                "to install the OS-level driver/permissions."
+            )
 
         # Start collectors
         self._sys_collector.start()
@@ -311,15 +354,15 @@ class Daemon:
         last_render = 0.0
         last_collect_refresh = 0.0
         # sim 8fps 省 CPU / 带宽, USB 15fps 让画面顺
-        render_hz = 8 if self.sim else 15
+        render_hz = 8 if not self._usb.is_open else 15
 
         log.info("Daemon running. Press Ctrl+C to stop.")
         try:
             while not self._stop.is_set():
                 now = time.time()
-                # 处理触摸: sim 从 queue, USB 从 device
+                # 处理触摸: sim 从 queue, USB 从 device (独立通道)
                 self._drain_touch_queue()
-                if not self.sim:
+                if self._usb.is_open:
                     self._poll_usb()
                 # Render at fixed rate
                 if now - last_render >= 1.0 / render_hz:
@@ -343,14 +386,24 @@ class Daemon:
                 self._sim.stop()
             if self._usb is not None:
                 self._usb.close()
+            # P4.1: stop control server + clean up PID file
+            try:
+                control.stop()
+            except Exception as e:  # noqa: BLE001
+                log.debug("control server stop: %s", e)
+            ipc.remove_pid_file()
             log.info("Daemon stopped")
 
 
 def run_daemon(foreground: bool = True, config_path: Optional[str] = None,
-               verbose: bool = False, sim: bool = False, sim_port: int = 8080) -> None:
-    """Run the daemon (foreground by default)."""
-    daemon = Daemon(config_path=config_path, verbose=verbose, sim=sim, sim_port=sim_port)
+               verbose: bool = False, sim_port: int = 8080) -> None:
+    """Run the daemon (foreground by default).
+
+    P3.2: sim channel is always started. USB channel is attempted at startup;
+    if no device is found the daemon continues in sim-only mode (warning).
+    """
+    daemon = Daemon(config_path=config_path, verbose=verbose, sim_port=sim_port)
     if not foreground:
-        # TODO: proper daemonization
+        # TODO: proper daemonization (P4 will add systemd/launchd/NSSM)
         log.warning("Daemon mode not fully implemented, running in foreground")
     daemon.run()

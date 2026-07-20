@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Optional
 
@@ -12,15 +15,18 @@ from .canvas import Canvas
 from .theme import Color, VSCodeDark, SCREEN_W, INDICATOR_H, TITLE_H
 
 
+log = logging.getLogger("codebot.render.widgets")
+
+
 # Font cache
 _font_cache: dict[tuple[str, int], ImageFont.ImageFont] = {}
 
 
-# Project-bundled font directory (for DSEG 7-segment).
-# Path: <repo>/code-bot-service/fonts/
-# widgets.py is at <repo>/code-bot-service/src/codebot/render/widgets.py
-# 4 levels up gets us to <repo>/code-bot-service/
-_FONTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "fonts"
+# Project-bundled font directory (DSEG 7-segment).
+# importlib.resources 跟随 wheel 安装; 4 层 parent×4 只在开发模式 (-e)
+# 才指向 <repo>/fonts/, pip install . 后会指向 site-packages/codebot/fonts
+# 不存在 → font 加载失败。
+_FONTS_DIR = files("codebot") / "fonts"
 
 
 def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
@@ -39,35 +45,73 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
 
     font = None
     if name == "mono":
+        # 三平台: 系统级字体目录 + 用户级字体目录
         candidates = [
+            # Linux 系统级
             "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/Library/Fonts/JetBrainsMono-Regular.ttf",  # macOS
-            "C:\\Windows\\Fonts\\consola.ttf",  # Windows
+            # Linux 用户级 (per-user fontconfig)
+            str(Path.home() / ".local/share/fonts/JetBrainsMono-Regular.ttf"),
+            str(Path.home() / ".fonts/JetBrainsMono-Regular.ttf"),
+            # macOS 系统级
+            "/Library/Fonts/JetBrainsMono-Regular.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+            "/System/Library/Fonts/SFMono-Regular.otf",
+            # macOS 用户级
+            str(Path.home() / "Library/Fonts/JetBrainsMono-Regular.ttf"),
+            # Windows 系统级 (C:\Windows\Fonts)
+            "C:\\Windows\\Fonts\\consola.ttf",
+            # Windows 用户级 (Win 10+ 字体商店安装位置)
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\consola.ttf"),
         ]
     elif name == "bold":
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            str(Path.home() / ".local/share/fonts/JetBrainsMono-Bold.ttf"),
+            str(Path.home() / ".fonts/JetBrainsMono-Bold.ttf"),
+            "/Library/Fonts/JetBrainsMono-Bold.ttf",
+            "/System/Library/Fonts/SFMono-Bold.otf",
+            str(Path.home() / "Library/Fonts/JetBrainsMono-Bold.ttf"),
+            "C:\\Windows\\Fonts\\consolab.ttf",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\consolab.ttf"),
         ]
     elif name == "digital":
-        # 7-segment display font, bundled with the project
-        candidates = [
-            str(_FONTS_DIR / "DSEG7Classic-Bold.ttf"),
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",  # fallback
-        ]
+        # 7-segment display font, bundled with the project.
+        # _FONTS_DIR 走 importlib.resources; pip install . 后路径跟随 wheel.
+        # 不存在时回退到默认字体而非系统 DejaVu, 避免硬编码系统路径不一致。
+        dseg_path = _FONTS_DIR / "DSEG7Classic-Bold.ttf"
+        try:
+            if dseg_path.is_file():
+                candidates = [str(dseg_path)]
+            else:
+                log.warning(
+                    "DSEG7 font not found at %s; falling back to default font",
+                    dseg_path,
+                )
+                candidates = []  # 直接走末尾 load_default 兜底
+        except OSError as e:
+            log.warning("DSEG7 font lookup failed (%s); using default font", e)
+            candidates = []
     elif name == "cjk":
         # CJK font for date / Chinese labels. TTC index is ignored by
         # Pillow's getbbox path; PIL picks the first face that has the
-        # requested glyph, so the .ttc file works as-is on Linux.
+        # requested glyph, so the .ttc file works as-is on Linux/macOS.
         candidates = [
+            # Linux 系统级
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/truetype/arphic/uming.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/System/Library/Fonts/PingFang.ttc",  # macOS
-            "C:\\Windows\\Fonts\\msyh.ttc",  # Windows
+            # Linux 用户级
+            str(Path.home() / ".local/share/fonts/NotoSansCJK-Regular.ttc"),
+            # macOS
+            "/System/Library/Fonts/PingFang.ttc",
+            "/Library/Fonts/Songti.ttc",
+            # Windows
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\msyh.ttc"),
         ]
     else:
         candidates = []
