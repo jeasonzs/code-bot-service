@@ -41,47 +41,22 @@ def doctor():
 
 
 @cli.command()
-@click.option("--yes", "-y", is_flag=True, help="Non-interactive (assume yes for sudo / UAC)")
-def setup_driver(yes: bool):
-    """Install the OS-level USB driver / permissions for the Code Bot device.
+@click.option("--doctor-only", is_flag=True,
+              help="只跑 doctor 检查环境，不安装任何东西（CI 友好）。")
+@click.option("--interactive", "-i", is_flag=True,
+              help="启用交互确认（默认全非交互：直接 sudo / 覆写 / 注册任务）。")
+def setup(doctor_only: bool, interactive: bool):
+    """一条命令完成平台感知安装：USB 驱动 + 守护进程自启 + Claude 集成。
 
-    Three platforms:
+    自动识别当前平台（Linux / macOS / Windows）。默认非交互，
+    跑完即可：USB 设备被授权、daemon 在用户登录时自启、Claude Code
+    状态栏 + 8 个 lifecycle hook 注入 ~/.claude/settings.json。
 
-      * Linux:  copies udev/99-codebot.rules to /etc/udev/rules.d/ (needs sudo),
-                reloads udev, prints hint about adding user to plugdev group.
-      * macOS:  no driver install needed (pyusb uses IOKit); prompts the user
-                to allow the device on first plug-in (TCC prompt).
-      * Windows: installs windows/codebot-inface0.inf via pnputil (needs
-                 Administrator), binding interface 0 (Vendor) to WinUSB while
-                 leaving interface 1 (HID Keyboard) on the system default.
-
-    Returns 0 on success, 1 if user action is required (sudo / UAC), 2 on
-    fatal error. Always runs `doctor` first to surface environment issues.
+    各阶段：doctor → driver → service → claude。
+    幂等：再跑一次不会出错。
     """
-    from .driver_setup import run_setup
-    sys.exit(run_setup(assume_yes=yes))
-
-
-@cli.command()
-@click.option("--yes", "-y", is_flag=True,
-              help="Non-interactive (no prompt before overwriting settings.json)")
-def install_claude(yes: bool):
-    """Install Claude Code statusline + 8 lifecycle hooks.
-
-    Merges ``statusLine`` + ``hooks`` blocks into ``~/.claude/settings.json``
-    (cross-platform: ``Path.home() / .claude / settings.json``) so the LCD
-    Claude page shows the live Claude Code status. Hook commands reference
-    the console_scripts entry points ``codebot-claude-statusline`` /
-    ``codebot-claude-status-hook`` (installed on PATH by ``pip install
-    codebot``), so no shell wrapper is needed and Windows works without
-    Git Bash.
-
-    Idempotent: re-running overwrites both blocks but preserves every other
-    key (e.g. ``mcpServers``, ``permissions``) and backs up the previous
-    settings to ``~/.claude/backups/settings.json.<TS>.bak``.
-    """
-    from .claude_integration.install import run_install
-    sys.exit(run_install(assume_yes=yes))
+    from .setup import run_setup
+    sys.exit(run_setup(assume_yes=not interactive, doctor_only=doctor_only))
 
 
 @cli.command()
@@ -156,6 +131,26 @@ def screenshot():
 def send(text: str):
     """Send a keystroke string via HID (for testing)."""
     click.echo(f"send: TODO - convert {text!r} to HID and send")
+
+
+@cli.command()
+@click.option("--interactive", "-i", is_flag=True,
+              help="启用交互确认（默认全非交互：直接删 / 覆写 / 注销任务）。")
+def teardown(interactive: bool):
+    """codebotd setup 的反向操作：清掉所有 setup 装下的东西。
+
+    卸载范围（全部默认执行）：
+      * driver — udev 规则（系统 + 用户两级）/ WinUSB INF 绑定（需管理员）
+      * service — systemd user unit / launchd LaunchAgent / Task Scheduler 任务
+      * Claude Code — ~/.claude/settings.json 里的 statusLine + hooks 块（备份后删除）
+
+    不动：codebot 包本身（pip uninstall codebot 单独跑）、daemon 状态文件、
+    ~/.code-bot/。
+
+    幂等：再跑一次不会出错（已经清掉的就 no-op）。
+    """
+    from .teardown import run_teardown
+    sys.exit(run_teardown(assume_yes=not interactive))
 
 
 @cli.command()

@@ -1,5 +1,11 @@
 # systemd user unit (Linux)
 
+> **Note:** `codebotd setup` will install + enable this automatically (with
+> `@CODEBOTD_PATH@` substituted to the resolved `which codebotd` path). The
+> template lives inside the package at `src/codebot/systemd/codebot.service.in`.
+> This README is here for manual / advanced installs only — most users should
+> run `codebotd setup` once after `pip install codebot` and stop reading.
+
 ## 安装
 
 ```bash

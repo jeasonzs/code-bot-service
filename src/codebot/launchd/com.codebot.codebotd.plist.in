@@ -8,7 +8,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/codebotd</string>
+        <!-- @CODEBOTD_PATH@ is substituted with `shutil.which("codebotd")`
+             at install time by `codebotd setup`, so this plist always
+             points at the actual binary regardless of how pip installed it
+             (system Python / --user / Homebrew / python.org). -->
+        <string>@CODEBOTD_PATH@</string>
         <string>start</string>
     </array>
 

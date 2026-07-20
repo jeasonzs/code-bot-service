@@ -8,7 +8,10 @@ Wants=network-online.target
 Type=simple
 # Foreground mode is default since the daemon now handles its own PID file
 # + control port; ``--foreground`` is implicit.
-ExecStart=%h/.local/bin/codebotd start
+# @CODEBOTD_PATH@ is substituted with `shutil.which("codebotd")` at install
+# time by `codebotd setup`, so this unit always points at the actual binary
+# no matter where pip put it (system Python, --user, venv).
+ExecStart=@CODEBOTD_PATH@ start
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

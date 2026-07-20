@@ -56,6 +56,12 @@ codebot = [
     "icons/*.png",
     "udev/*.rules",
     "windows/*.inf",
+    # Service-unit templates (filled at install time via `codebotd setup`).
+    # `.in` suffix is the autoconf/CMake convention — install code does the
+    # @CODEBOTD_PATH@ substitution before writing to ~/.config/systemd/user
+    # or ~/Library/LaunchAgents.
+    "systemd/*.service.in",
+    "launchd/*.plist.in",
     # P3.3: Windows vendor libusb.dll (fallback when WinUSB unavailable)
     "_vendor/libusb/windows-*/*.dll",
 ]

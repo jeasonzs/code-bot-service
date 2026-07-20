@@ -57,18 +57,31 @@ python3 -m pip install codebot
 # 1. 装包
 pip install codebot
 
-# 2. 验证环境（Python / 依赖 / libusb / 设备）
-codebotd doctor
+# 2. 一条命令搞定所有平台相关的安装（驱动 + 自启 + Claude 集成）
+codebotd setup                       # 默认非交互；sudo / 管理员按提示
+#   或 CI / Docker:
+codebotd setup --doctor-only         # 只验证环境，不动任何东西
 
-# 3. 装平台 USB 驱动（一次性，详见 docs/hardware-setup.md）
-sudo codebotd setup-driver           # Linux/macOS 可省 sudo；Windows 需管理员
-
-# 4. 启动 daemon（sim 通道常驻；插上设备时 USB 通道同时跑）
+# 3. 启动 daemon（sim 通道常驻；插上设备时 USB 通道同时跑）
 codebotd start
 
 # 浏览器打开 http://127.0.0.1:8080 看 LCD 渲染
 # Ctrl+C 优雅退出
+
+# 卸载：反向操作（清掉 setup 装的所有东西）
+codebotd teardown                    # 同样默认非交互
+pip uninstall codebot                # 单独卸载 Python 包
 ```
+
+`codebotd setup` 自动识别平台：
+
+- **Linux**：装 udev 规则 + 注册 systemd 用户级 unit（用户登录自启）
+- **macOS**：TCC 提示 + 写 `~/Library/LaunchAgents/com.codebot.codebotd.plist` + `launchctl load -w`
+- **Windows**：装 WinUSB INF（管理员） + 注册 Task Scheduler 任务（onlogon）
+
+幂等。再跑一次不会出错。
+
+`codebotd teardown` 同样幂等：再跑是 no-op。不会动 daemon 状态文件 / `~/.code-bot/`。
 
 ## 子命令
 
@@ -78,21 +91,13 @@ codebotd start
 | `codebotd stop` | 停止运行中的 daemon（通过 loopback control port） |
 | `codebotd status` | 查看 daemon 状态（PID / ports / USB device） |
 | `codebotd doctor` | 环境诊断（Python / 依赖 / libusb / 设备枚举） |
-| `codebotd setup-driver` | 一次性安装平台 USB 驱动（Linux udev / Windows INF / macOS TCC 提示） |
-| `codebotd install-claude` | 把 Claude Code statusline + 8 hooks 合并进 `~/.claude/settings.json`（让 LCD Claude 页有数据） |
+| `codebotd setup` | 一条命令搞定平台驱动 + 自启 + Claude 集成 |
+| `codebotd teardown` | `setup` 的反向：清掉所有平台相关的东西（驱动 / 自启 / Claude 集成） |
 | `codebotd test-protocol` | USB 协议编解码自检 |
 
 ## Claude Code 集成（可选）
 
-如果你用 [Claude Code](https://claude.com/product/claude-code)，装一下让 LCD 的 Claude 页显示实时状态：
-
-```bash
-pip install codebot           # 会顺带装两个 console_scripts:
-                              #   - codebot-claude-statusline
-                              #   - codebot-claude-status-hook
-                              # 它们在 PATH 上, 跨平台 (Win/macOS/Linux)
-codebotd install-claude       # 把 statusLine + 8 个 hooks 合并进 ~/.claude/settings.json
-```
+如果你用 [Claude Code](https://claude.com/product/claude-code)，`codebotd setup` 会自动把 statusline + 8 hooks 合并进 `~/.claude/settings.json`。LCD 的 Claude 页就有数据了。
 
 工作原理：
 
@@ -109,10 +114,10 @@ Claude Code 会话
                                                                   LCD Claude 页
 ```
 
-不跑 `install-claude` 完全 OK —— LCD 其他页面（时钟 / 系统 / GitHub）正常工作；
+不装 Claude 集成也完全 OK —— LCD 其他页面（时钟 / 系统 / GitHub）正常工作；
 只有 Claude 页会显示 idle / 没数据。
 
-`install-claude` 是幂等的：再跑会备份 `~/.claude/settings.json.<TS>.bak` 然后覆盖 statusLine + hooks 块，保留 `mcpServers` / `permissions` 等其他 key。
+Claude 集成是幂等的：再跑会备份 `~/.claude/settings.json.<TS>.bak` 然后覆盖 statusLine + hooks 块，保留 `mcpServers` / `permissions` 等其他 key。
 
 ## 架构
 

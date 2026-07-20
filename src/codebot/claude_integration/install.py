@@ -215,5 +215,59 @@ def run_install(*, assume_yes: bool = False) -> int:
     return 0
 
 
+def run_uninstall(*, assume_yes: bool = True) -> int:
+    """Reverse of ``run_install``: remove the ``statusLine`` and ``hooks``
+    blocks that ``codebotd setup`` wrote into ``~/.claude/settings.json``.
+
+    Other keys (mcpServers / permissions / etc.) are preserved. The current
+    settings file is backed up to ``~/.claude/backups/settings.json.<TS>.bak``
+    before modification — the same convention as ``run_install``.
+
+    Idempotent: re-running after a previous teardown is a no-op (rc=0).
+    """
+    if not _SETTINGS_PATH.exists():
+        print(f"[teardown.claude] No {_SETTINGS_PATH}; nothing to remove.")
+        return 0
+
+    try:
+        existing = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"[teardown.claude] ERROR: {_SETTINGS_PATH} is invalid JSON ({e}); "
+              "refusing to modify.", file=sys.stderr)
+        return 2
+    if not isinstance(existing, dict):
+        print(f"[teardown.claude] ERROR: {_SETTINGS_PATH} is not a JSON object; "
+              "refusing to modify.", file=sys.stderr)
+        return 2
+
+    if "statusLine" not in existing and "hooks" not in existing:
+        print(f"[teardown.claude] No codebot entries in {_SETTINGS_PATH}; "
+              "nothing to remove.")
+        return 0
+
+    backup_path = _backup_existing(_SETTINGS_PATH)
+    if backup_path is not None:
+        print(f"[teardown.claude] Backed up {_SETTINGS_PATH} -> {backup_path}")
+
+    existing.pop("statusLine", None)
+    existing.pop("hooks", None)
+
+    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _SETTINGS_PATH.with_name(_SETTINGS_PATH.name + ".tmp")
+    tmp.write_text(
+        json.dumps(existing, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(tmp, 0o600)
+    except (OSError, NotImplementedError):
+        pass
+    os.replace(tmp, _SETTINGS_PATH)
+
+    print(f"[teardown.claude] Removed statusLine + hooks from {_SETTINGS_PATH}")
+    print("Restart Claude Code (or open a new session) for changes to take effect.")
+    return 0
+
+
 if __name__ == "__main__":
     sys.exit(run_install())

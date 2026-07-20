@@ -1,5 +1,10 @@
 # launchd LaunchAgent (macOS)
 
+> **Note:** `codebotd setup` will register this automatically (with `@CODEBOTD_PATH@`
+> substituted to the resolved `which codebotd` path). This file is here for
+> manual / advanced installs only — most users should run `codebotd setup` once
+> after `pip install codebot` and stop reading.
+
 ## 安装
 
 ```bash
@@ -64,6 +69,6 @@ log stream --predicate 'process == "codebotd"' --style compact
 
 ## 注意
 
-- 首次启动需要 USB 设备权限（TCC 弹窗），跑 `codebotd setup-driver` 看指引
+- 首次启动需要 USB 设备权限（TCC 弹窗），跑 `codebotd setup` 看指引
 - macOS Big Sur+ 对未签名二进制要求更严；如有问题用 python.org Python
 - 如果 daemon 跑在 venv 里，把 venv 的 python -m codebot.cli start 作为 ProgramArguments
