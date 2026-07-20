@@ -34,8 +34,6 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable
 
-from ._paths import real_user_home
-
 
 log = logging.getLogger("codebot.driver_setup")
 
@@ -82,39 +80,26 @@ def _setup_linux(assume_yes: bool) -> int:
         print(f"[setup.driver] ERROR: udev rules not found at {src}", file=sys.stderr)
         return 2
 
-    target_root = Path("/etc/udev/rules.d/99-codebot.rules")
-    target_user = real_user_home() / ".config/udev/rules.d/99-codebot.rules"
+    # udev rules MUST land in /etc/udev/rules.d/ — that's the only location
+    # distros (systemd-based) actually load. User-level rules under
+    # ~/.config/udev/rules.d/ are silently ignored on most setups, so we
+    # don't fall back to that — better to fail loudly and tell the user
+    # to re-run under sudo than to install a rule that does nothing.
+    target = Path("/etc/udev/rules.d/99-codebot.rules")
 
-    if os.geteuid() == 0:
-        target_root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, target_root)
-        print(f"[setup.driver] Installed {target_root}")
-        _reload_udev()
-        _print_plugdev_hint()
-        return 0
-
-    # Non-root: install user-level rules; suggest sudo for system-wide visibility.
-    print("[setup.driver] Linux: installing user-level udev rules (no sudo needed).")
-    print("              For system-wide visibility, re-run with `sudo codebotd setup`.")
-    target_user.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(src, target_user)
-    print(f"[setup.driver] Installed {target_user}")
-
-    if not assume_yes:
+    if os.geteuid() != 0:
+        print("[setup.driver] ERROR: udev rule install requires root.", file=sys.stderr)
+        print("              Re-run the whole setup under sudo so the rest of")
+        print("              the phases (systemd unit, Claude integration) also")
+        print("              land in your user account:")
         print()
-        print("  ⚠ User-level udev rules only apply when the user runs a session")
-        print("    manager that loads them. For most distros (systemd), run with")
-        print("    sudo instead:")
+        print("                sudo codebotd setup")
         print()
-        print("      sudo codebotd setup")
-        print()
-        print("    Already done? Press Enter to continue, Ctrl+C to abort.")
-        try:
-            input()
-        except (EOFError, KeyboardInterrupt):
-            print("\n[setup.driver] aborted", file=sys.stderr)
-            return 1
+        return 1
 
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, target)
+    print(f"[setup.driver] Installed {target}")
     _reload_udev()
     _print_plugdev_hint()
     return 0
@@ -234,24 +219,28 @@ def _is_windows_admin() -> bool:
 # Teardown (reverse of install)
 # ==============================================================
 def _teardown_linux(assume_yes: bool) -> int:
-    """Remove udev rule files at both system and user paths, then reload udev."""
-    targets = [
-        Path("/etc/udev/rules.d/99-codebot.rules"),
-        real_user_home() / ".config/udev/rules.d/99-codebot.rules",
-    ]
-    rc = 0
-    for p in targets:
-        if not p.exists():
-            continue
-        try:
-            p.unlink()
-            print(f"[teardown.driver] Removed {p}")
-        except PermissionError:
-            print(f"[teardown.driver] WARN: cannot remove {p} (need sudo)",
-                  file=sys.stderr)
-            rc = max(rc, 1)
+    """Remove the system udev rule, then reload udev.
+
+    We only touch /etc/udev/rules.d/ — that's the only path setup ever
+    writes to (user-level rules under ~/.config/udev/rules.d/ are never
+    installed, so there's nothing to remove there). ``assume_yes`` is
+    accepted (and ignored) for dispatcher-signature uniformity with the
+    other teardown handlers.
+    """
+    del assume_yes  # noqa: ARG001 — signature-uniformity parameter
+    target = Path("/etc/udev/rules.d/99-codebot.rules")
+    if not target.exists():
+        print("[teardown.driver] No system udev rule to remove.")
+        return 0
+    try:
+        target.unlink()
+        print(f"[teardown.driver] Removed {target}")
+    except PermissionError:
+        print(f"[teardown.driver] WARN: cannot remove {target} (need sudo)",
+              file=sys.stderr)
+        return 1
     _reload_udev_teardown()
-    return rc
+    return 0
 
 
 def _reload_udev_teardown() -> None:
@@ -313,13 +302,13 @@ def _teardown_windows(assume_yes: bool) -> int:
 # ==============================================================
 # Dispatch
 # ==============================================================
-_DRIVER_HANDLERS: dict[str, Callable[[bool], int]] = {
+_DRIVER_HANDLERS: dict[str, Callable[..., int]] = {
     "linux": _setup_linux,
     "darwin": _setup_macos,
     "win32": _setup_windows,
 }
 
-_DRIVER_TEARDOWN_HANDLERS: dict[str, Callable[[bool], int]] = {
+_DRIVER_TEARDOWN_HANDLERS: dict[str, Callable[..., int]] = {
     "linux": _teardown_linux,
     "darwin": _teardown_macos,
     "win32": _teardown_windows,

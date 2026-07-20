@@ -69,8 +69,9 @@ sudo codebotd setup
 > user-scope 写入仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），
 > 不会写到 `/root` 下。这是 `codebotd setup` 默认推荐 sudo 跑的原因。
 
-如果用 `codebotd setup`（无 sudo）会装到 `~/.config/udev/rules.d/`，
-只在 user session manager 加载时生效。推荐 sudo。
+`codebotd setup`（无 sudo）下 udev 阶段会**直接报错退出**——没有
+fallback 到 `~/.config/udev/rules.d/`。那路径在 systemd 系发行版基本
+不加载，写了也是装了个寂寞。`sudo codebotd setup` 是唯一可靠路径。
 
 ### 验证
 
