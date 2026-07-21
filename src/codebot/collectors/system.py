@@ -88,15 +88,32 @@ class SystemCollector:
 
         cores_logical = psutil.cpu_count(logical=True) or 0
 
-        # First available sensor reading; psutil returns {} on systems without
-        # sensors (e.g. macOS, some VMs), so this degrades to None gracefully.
+        # Prefer known CPU package sensors. acpitz (and similar ACPI thermal
+        # zones) report a static BIOS reference temp that doesn't track CPU
+        # load — often ~28°C — and shouldn't be shown as "CPU temperature".
+        # If no known CPU sensor is present (e.g. macOS, some VMs), fall back
+        # to the first non-empty reading rather than None.
+        _CPU_TEMP_KEYS = (
+            "coretemp",      # Intel
+            "k10temp",       # AMD K10+
+            "cpu_thermal",   # ARM / Raspberry Pi
+            "cpu-thermal",   # some Linux distros
+            "zenpower",      # AMD Zen (third-party driver)
+            "amd_thermal",   # newer AMD
+        )
         cpu_temp_c: Optional[float] = None
         try:
             temps = psutil.sensors_temperatures(fahrenheit=False)
-            for entries in temps.values():
+            for key in _CPU_TEMP_KEYS:
+                entries = temps.get(key)
                 if entries:
                     cpu_temp_c = entries[0].current
                     break
+            if cpu_temp_c is None:
+                for entries in temps.values():
+                    if entries:
+                        cpu_temp_c = entries[0].current
+                        break
         except (AttributeError, OSError):
             pass
 
