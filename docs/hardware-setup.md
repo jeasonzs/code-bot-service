@@ -7,12 +7,12 @@ talk to the Code Bot USB device (VID=`0x1A86` PID=`0xCB0B`, WCH CH32X033F8P6).
 
 ```bash
 # 1. 装包
-pip install codebot
+pip install codebot                  # Linux PEP 668 发行版用：pipx install codebot
 
 # 2. 一条命令搞定所有平台安装（驱动 + 自启 + Claude 集成）
-codebotd setup
+sudo "$(which codebotd)" setup       # 绝对路径写法，跨所有装法通用
 #   或 CI / Docker（只验证环境，不安装任何东西）：
-codebotd setup --doctor-only
+codebotd setup --doctor-only         # 这一行不需要 sudo（不动 /etc/）
 
 # 3. 启动 daemon（sim 通道常驻；插上设备时 USB 通道同时跑）
 codebotd start
@@ -55,7 +55,7 @@ sudo apk add libusb
 ### 安装 udev 规则
 
 ```bash
-sudo codebotd setup
+sudo "$(which codebotd)" setup       # 绝对路径写法，跨所有装法通用
 ```
 
 这会：
@@ -71,7 +71,7 @@ sudo codebotd setup
 
 `codebotd setup`（无 sudo）下 udev 阶段会**直接报错退出**——没有
 fallback 到 `~/.config/udev/rules.d/`。那路径在 systemd 系发行版基本
-不加载，写了也是装了个寂寞。`sudo codebotd setup` 是唯一可靠路径。
+不加载，写了也是装了个寂寞。`sudo "$(which codebotd)" setup` 是唯一可靠路径。
 
 ### 验证
 

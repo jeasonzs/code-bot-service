@@ -97,7 +97,12 @@ def _load_libusb_native() -> None:
         # Vendor .dll fallback — primary path on Windows is WinUSB which
         # does not need libusb-1.0.dll at all.
         try:
-            from importlib.resources import files
+            # Python 3.8 lacks importlib.resources.files — use the backport
+            # there (declared as a conditional dep in pyproject.toml).
+            try:
+                from importlib.resources import files
+            except ImportError:  # pragma: no cover — only on Python < 3.9
+                from importlib_resources import files  # type: ignore[no-redef]
             vendor = files("codebot._vendor.libusb")
             arch = "windows-x86_64" if struct.calcsize("P") == 8 else "windows-x86"
             dll_path = str(vendor / arch / "libusb-1.0.dll")

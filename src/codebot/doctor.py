@@ -29,7 +29,7 @@ log = logging.getLogger("codebot.doctor")
 
 
 # Required Python version range (must match pyproject.toml).
-MIN_PY = (3, 10)
+MIN_PY = (3, 8)
 MAX_PY_EXCLUSIVE = (3, 14)
 
 
@@ -163,7 +163,12 @@ def _check_libusb() -> Check:
     if sys.platform == "win32":
         # Try vendor .dll first (Windows-x86_64 / Windows-x86)
         try:
-            from importlib.resources import files
+            # Python 3.8 lacks importlib.resources.files — use the backport
+            # there (declared as a conditional dep in pyproject.toml).
+            try:
+                from importlib.resources import files
+            except ImportError:  # pragma: no cover — only on Python < 3.9
+                from importlib_resources import files  # type: ignore[no-redef]
             vendor = files("codebot._vendor.libusb")
             arch = "windows-x86_64" if struct.calcsize("P") == 8 else "windows-x86"
             dll_path = str(vendor / arch / "libusb-1.0.dll")

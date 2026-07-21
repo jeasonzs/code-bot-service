@@ -42,11 +42,17 @@ python3 -m pip install codebot
 ### Linux
 
 - Ubuntu 22.04+ / Debian 12+ / Fedora 38+ / Arch：系统 Python 3.10+ 已够用
+  - **推荐**（避开 PEP 668）：`pipx install codebot`
+    pipx 通常从发行版仓库装：`sudo apt install pipx`（Debian/Ubuntu）/
+    `sudo dnf install pipx`（Fedora）
+  - 备选：`pip install --user codebot`（旧发行版可用；新发行版 PEP 668 会拒）
+  - 注：Debian 12+ / Fedora 38+ / Arch 启用 PEP 668，连 `pip install --user` 也拦，
+    必须走 pipx 或 `pip install --break-system-packages`（不推荐）
   ```bash
-  sudo apt install python3-pip        # Debian/Ubuntu
+  sudo apt install python3-pip python3-venv        # Debian/Ubuntu
   # 或
-  sudo dnf install python3-pip        # Fedora
-  pip3 install --user codebot
+  sudo dnf install python3-pip                     # Fedora
+  pipx install codebot                             # 或：pip install --user codebot（旧发行版）
   ```
 - 旧发行版（Ubuntu 20.04 等 Python 3.8）：用 [deadsnakes PPA](https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa)
   或 [pyenv](https://github.com/pyenv/pyenv) 装 3.11
@@ -55,10 +61,14 @@ python3 -m pip install codebot
 
 ```bash
 # 1. 装包
-pip install codebot
+pip install codebot                  # Linux PEP 668 发行版用：pipx install codebot
 
 # 2. 一条命令搞定所有平台相关的安装（驱动 + 自启 + Claude 集成）
-sudo codebotd setup                  # Linux/macOS 推荐 sudo（udev 需 root）
+codebotd setup                       # 默认非交互；Linux 上 udev 那一步
+                                     # 会内部用 sudo 写 /etc/udev/rules.d/，
+                                     # Python 进程保持在用户 env 不动
+                                     # （不被 sudo 切换到 root env，避免
+                                     # `pip install --user` 下找不到 codebot）
                                      # Windows 用管理员 PowerShell 同理
 #   或 CI / Docker:
 codebotd setup --doctor-only         # 只验证环境，不动任何东西
@@ -82,8 +92,11 @@ pip uninstall codebot                # 单独卸载 Python 包
 
 整个进程跑在 `sudo` 下时，user-scope 写入（systemd unit / plist / Claude
 集成）仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），不会写到
-`/root`。所以 Linux 推荐 `sudo codebotd setup`，而不是只把 `--user` 装 pip
-包那一步 sudo 一下。
+`/root`。所以 Linux 推荐 `sudo "$(which codebotd)" setup`（绝对路径，
+跨所有装法通用），而不是只把 `--user` 装 pip 包那一步 sudo 一下。
+**裸 `sudo codebotd setup` 只在 `sudo pip install` 装法下 work**——
+其他装法 sudo 的 secure_path 默认不含 `~/.local/bin/`，找不到 codebotd。
+见上面"Sudo 用法"段。
 
 幂等。再跑一次不会出错。
 
@@ -100,6 +113,48 @@ pip uninstall codebot                # 单独卸载 Python 包
 | `codebotd setup` | 一条命令搞定平台驱动 + 自启 + Claude 集成 |
 | `codebotd teardown` | `setup` 的反向：清掉所有平台相关的东西（驱动 / 自启 / Claude 集成） |
 | `codebotd test-protocol` | USB 协议编解码自检 |
+
+## Sudo 用法
+
+`codebotd setup` / `teardown` 在 Linux 上需要写 `/etc/udev/rules.d/`——
+**setup / teardown 内部只对 udev 那一步 shell 命令（`install` / `rm` /
+`udevadm`）加 sudo**，python 进程保持在用户 env 不动。这样既不需要用户
+预先跑 `sudo`，又不会触发"`sudo` 切换到 root env → python 找不到 codebot"
+的兼容问题（尤其是 `pip install --user` 装法下，codebotd 的 shebang 是
+`#!/usr/bin/env python3`，sudo 下会解析到 system python）。
+
+用户视角的交互：
+
+```text
+$ codebotd setup
+[setup] phase 2/4: driver (linux)
+[setup.driver] Installing udev rule to /etc/udev/rules.d/99-codebot.rules
+[sudo] password for you: ********
+[setup.driver] udev rules reloaded
+[setup] phase 3/4: service ...
+[setup] phase 4/4: Claude Code integration
+```
+
+| 操作 | sudo? |
+|---|---|
+| `pip install codebot` / `pipx install codebot` | **否**（用户空间） |
+| `apt install libusb-1.0-0` / `dnf install libusb` 等系统包 | **是**（一次性） |
+| `codebotd start` / `stop` / `status` / `doctor` | **否**（用户态 daemon：systemd `--user` / LaunchAgent / Task Scheduler 用户任务） |
+| `codebotd setup` / `teardown` | **内部 sudo（仅 udev 那一步 shell 命令）**；Windows 用管理员 PowerShell；macOS 不需要 |
+| `apt install python3-pip` / `pipx` 等系统包 | **是**（一次性） |
+
+**手动跑 `sudo codebotd setup` 也仍然 work**：内部 `_run_as_root` helper
+检测到 `euid=0`，跳过 sudo 前缀，直接跑 `install` / `udevadm`。等于
+"已经 sudo 过了，不要再 sudo 一次"。
+
+**非交互环境**（容器 / CI / cron）：setup 跑到 udev 那一步会卡 sudo 密码
+框——`codebotd setup --doctor-only` 可以只跑环境检查不写东西；或者先
+`sudo -v` 把凭证缓存住再跑 setup。
+
+**sudo 不可用**（容器没装 `sudo` 包）：`_run_as_root` 会抛
+`RuntimeError("sudo is required to install udev rules")`。绕开办法是手动
+跑 `sudo codebotd setup`（同样需要 sudo 在 root 的 PATH 里——这是一个鸡
+生蛋问题，最干净是 `apt install sudo`）。
 
 ## Claude Code 集成（可选）
 
@@ -139,6 +194,11 @@ Claude 集成是幂等的：再跑会备份 `~/.claude/settings.json.<TS>.bak` �
 - `libusb FAIL on Linux` → `sudo apt install libusb-1.0-0`
 - `USB device scan INFO not found` → 检查 udev（Linux）/ WinUSB 绑定（Windows）/ TCC 权限（macOS）
 - Python 版本太旧 → 按上面"三平台 Python 安装"升级
+- `setup` 卡在 `sudo` 密码框 → 输入密码，或先 `sudo -v` 把凭证缓存住再跑
+- 容器 / 最小镜像无 `sudo` → `apt install sudo`，或直接手动 `sudo codebotd setup`
+  （仍走内部 `_run_as_root`，euid==0 时 helper 不再前缀 sudo）
+- `sudo is required to install udev rules` → 当前环境没装 `sudo` 二进制，
+  且 euid 不是 0；只能手动 `sudo codebotd setup` 或装 sudo
 
 ## 详细文档
 

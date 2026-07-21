@@ -13,13 +13,24 @@ Without this, ``sudo codebotd setup`` would write a systemd unit for
 daemon rendered in that unit would be unresolvable (root's PATH doesn't
 include the user's pip bin).
 
+Privilege elevation (wrapping ``install`` / ``rm`` / ``udevadm`` with
+``sudo`` when needed) lives in ``codebot.os_helper.run_as_root`` —
+import that directly when a shell command needs root. We never ``sudo``
+python — root's env doesn't have ``codebot`` installed, so re-execing
+would break imports (especially under ``pip install --user``, where the
+script's shebang resolves to system python under root).
+
 Usage:
 
     from ._paths import real_user_home, resolve_codebotd, original_user
+    from .os_helper import run_as_root
 
     target = real_user_home() / ".config" / "systemd" / "user" / "codebot.service"
     codebotd = resolve_codebotd()
     user = original_user()  # None if not under sudo
+
+    run_as_root("install", "-m", "644", str(src), str(target))
+    run_as_root("udevadm", "control", "--reload-rules")
 """
 
 from __future__ import annotations
@@ -81,3 +92,7 @@ def resolve_codebotd() -> str | None:
         if cand.exists() and os.access(cand, os.X_OK):
             return str(cand)
     return None
+
+
+# Privilege elevation lives in ``codebot.os_helper.run_as_root`` — import
+# from there when a shell command needs root.

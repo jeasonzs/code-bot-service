@@ -5,8 +5,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from importlib.resources import files
 from pathlib import Path
+# Python 3.8 ships `importlib.resources` without `files()` (added in 3.9);
+# fall back to the backport so the package installs cleanly on 3.8 too.
+try:
+    from importlib.resources import files
+except ImportError:  # pragma: no cover — only hit on Python < 3.9
+    from importlib_resources import files  # type: ignore[no-redef]
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont

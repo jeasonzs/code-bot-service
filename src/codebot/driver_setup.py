@@ -30,12 +30,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from importlib.resources import files
+# Python 3.8 ships `importlib.resources` without `files()` (added in 3.9);
+# fall back to the backport so the package installs cleanly on 3.8 too.
+try:
+    from importlib.resources import files
+except ImportError:  # pragma: no cover — only hit on Python < 3.9
+    from importlib_resources import files  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Callable
 
 
 log = logging.getLogger("codebot.driver_setup")
+
+from .os_helper import run_as_root  # noqa: E402 — privilege helper, after logger
 
 
 # ==============================================================
@@ -80,26 +87,28 @@ def _setup_linux(assume_yes: bool) -> int:
         print(f"[setup.driver] ERROR: udev rules not found at {src}", file=sys.stderr)
         return 2
 
-    # udev rules MUST land in /etc/udev/rules.d/ — that's the only location
-    # distros (systemd-based) actually load. User-level rules under
-    # ~/.config/udev/rules.d/ are silently ignored on most setups, so we
-    # don't fall back to that — better to fail loudly and tell the user
-    # to re-run under sudo than to install a rule that does nothing.
     target = Path("/etc/udev/rules.d/99-codebot.rules")
 
-    if os.geteuid() != 0:
-        print("[setup.driver] ERROR: udev rule install requires root.", file=sys.stderr)
-        print("              Re-run the whole setup under sudo so the rest of")
-        print("              the phases (systemd unit, Claude integration) also")
-        print("              land in your user account:")
-        print()
-        print("                sudo codebotd setup")
-        print()
+    try:
+        run_as_root(
+            "install",
+            "-m", "644",
+            str(src),
+            str(target),
+        )
+    except FileNotFoundError:
+        print("[setup.driver] ERROR: sudo not found", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as e:
+        print(
+            f"[setup.driver] ERROR: failed to install udev rule "
+            f"(exit={e.returncode})",
+            file=sys.stderr,
+        )
         return 1
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(src, target)
     print(f"[setup.driver] Installed {target}")
+
     _reload_udev()
     _print_plugdev_hint()
     return 0
@@ -107,15 +116,19 @@ def _setup_linux(assume_yes: bool) -> int:
 
 def _reload_udev() -> None:
     try:
-        subprocess.run(
-            ["udevadm", "control", "--reload-rules"],
-            check=True, capture_output=True,
+        run_as_root(
+            "udevadm",
+            "control",
+            "--reload-rules",
         )
-        subprocess.run(
-            ["udevadm", "trigger"],
-            check=True, capture_output=True,
+
+        run_as_root(
+            "udevadm",
+            "trigger",
         )
+
         print("[setup.driver] udev rules reloaded")
+
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
         print(f"[setup.driver] WARN: udev reload failed ({e}); reboot to apply")
 
@@ -233,23 +246,32 @@ def _teardown_linux(assume_yes: bool) -> int:
         print("[teardown.driver] No system udev rule to remove.")
         return 0
     try:
-        target.unlink()
+        run_as_root("rm", str(target))
         print(f"[teardown.driver] Removed {target}")
-    except PermissionError:
-        print(f"[teardown.driver] WARN: cannot remove {target} (need sudo)",
-              file=sys.stderr)
+    except FileNotFoundError:
+        print("[teardown.driver] ERROR: sudo not found", file=sys.stderr)
+        return 2
+    except subprocess.CalledProcessError as e:
+        print(
+            f"[teardown.driver] WARN: cannot remove {target} "
+            f"(exit={e.returncode})",
+            file=sys.stderr,
+        )
         return 1
     _reload_udev_teardown()
     return 0
 
 
 def _reload_udev_teardown() -> None:
-    """Best-effort udev reload after rule removal (silent on failure)."""
+    """Best-effort udev reload after rule removal (silent on failure).
+
+    Same sudo-prefix treatment as ``_reload_udev`` — silent on failure
+    so teardown's "best-effort, clean up as much as possible" contract
+    holds even when the user only has partial sudo auth.
+    """
     try:
-        subprocess.run(["udevadm", "control", "--reload-rules"],
-                       check=True, capture_output=True)
-        subprocess.run(["udevadm", "trigger"],
-                       check=True, capture_output=True)
+        run_as_root("udevadm", "control", "--reload-rules")
+        run_as_root("udevadm", "trigger")
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 

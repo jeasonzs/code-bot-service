@@ -34,7 +34,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from importlib.resources import files
+# Python 3.8 ships `importlib.resources` without `files()` (added in 3.9);
+# fall back to the backport so the package installs cleanly on 3.8 too.
+try:
+    from importlib.resources import files
+except ImportError:  # pragma: no cover — only hit on Python < 3.9
+    from importlib_resources import files  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Callable
 
