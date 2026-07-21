@@ -1,11 +1,11 @@
 """Environment diagnostics for codebotd (codebotd doctor).
 
 检查项:
-- Python 版本 (>=3.10, <3.14)
+- Python 版本 (>=3.8, <3.14)
 - pip 路径与版本
 - 解释器架构 (x86_64 / aarch64 / arm64)
 - 关键依赖: pyusb, psutil, Pillow, PyYAML, click, platformdirs
-- libusb 加载状态 (按平台差异化: Linux 系统包 / macOS IOKit / Windows vendor dll)
+- PyUSB backend 是否可用
 - USB 设备枚举 (VID=0x1A86 PID=0xCB0B 是否能找到)
 
 PASS / FAIL / INFO 输出格式, 每行一项, 便于 grep / CI 解析。
@@ -14,8 +14,7 @@ PASS / FAIL / INFO 输出格式, 每行一项, 便于 grep / CI 解析。
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
+import importlib.util
 import logging
 import os
 import platform as _platform
@@ -28,9 +27,17 @@ from typing import Callable
 log = logging.getLogger("codebot.doctor")
 
 
-# Required Python version range (must match pyproject.toml).
+# Required Python version range.
+# Must match pyproject.toml:
+#
+# requires-python = ">=3.8,<3.14"
 MIN_PY = (3, 8)
 MAX_PY_EXCLUSIVE = (3, 14)
+
+
+# Code Bot USB device.
+USB_VENDOR_ID = 0x1A86
+USB_PRODUCT_ID = 0xCB0B
 
 
 @dataclass
@@ -46,212 +53,348 @@ class Check:
 
 
 def _check_python() -> Check:
+    """Check whether the current Python version is supported."""
+
     v = sys.version_info
+
     if MIN_PY <= (v.major, v.minor) < MAX_PY_EXCLUSIVE:
-        return Check("Python version", "PASS", f"{v.major}.{v.minor}.{v.micro}")
+        return Check(
+            "Python version",
+            "PASS",
+            f"{v.major}.{v.minor}.{v.micro}",
+        )
+
     if (v.major, v.minor) < MIN_PY:
         return Check(
-            "Python version", "FAIL",
-            f"{v.major}.{v.minor}.{v.micro} < {MIN_PY[0]}.{MIN_PY[1]}; upgrade Python",
+            "Python version",
+            "FAIL",
+            f"{v.major}.{v.minor}.{v.micro} < "
+            f"{MIN_PY[0]}.{MIN_PY[1]}; upgrade Python",
         )
+
     return Check(
-        "Python version", "FAIL",
-        f"{v.major}.{v.minor}.{v.micro} >= {MAX_PY_EXCLUSIVE[0]}.{MAX_PY_EXCLUSIVE[1]}; "
+        "Python version",
+        "FAIL",
+        f"{v.major}.{v.minor}.{v.micro} >= "
+        f"{MAX_PY_EXCLUSIVE[0]}.{MAX_PY_EXCLUSIVE[1]}; "
         f"downgrade or wait for support",
     )
 
 
 def _check_pip() -> Check:
-    """pip is convenient but optional: uv/poetry-managed venvs don't ship it.
+    """Check pip availability.
 
-    We downgrade to INFO when pip isn't importable but the environment looks
-    like a managed venv (uv/poetry leave a recognizable marker).
+    pip is convenient but optional. uv-managed environments may not
+    contain pip, so that situation is reported as INFO.
     """
+
     try:
-        import pip  # noqa: F401
-        return Check("pip", "PASS", f"{pip.__version__}")
+        import pip
+
+        return Check(
+            "pip",
+            "PASS",
+            f"{pip.__version__}",
+        )
+
     except ImportError:
-        import importlib.util
+        # pip is not importable.
         if importlib.util.find_spec("pip") is None:
-            # Check for managed-venv markers.
+            # Check for managed environment markers.
             venv = os.environ.get("VIRTUAL_ENV", "")
-            # uv leaves a pyvenv.cfg with `uv =` or pip is missing entirely.
+
             pyvenv_cfg = Path(sys.prefix) / "pyvenv.cfg"
+
             is_uv = False
+
             if pyvenv_cfg.exists():
                 try:
-                    is_uv = "uv" in pyvenv_cfg.read_text(errors="ignore").lower()
+                    content = pyvenv_cfg.read_text(
+                        errors="ignore",
+                    ).lower()
+
+                    is_uv = "uv" in content
+
                 except OSError:
                     pass
-            if is_uv or "uv" in sys.executable:
+
+            if is_uv or "uv" in sys.executable or venv:
                 return Check(
-                    "pip", "INFO",
-                    "not installed; managed by uv — use `uv pip install ...`",
+                    "pip",
+                    "INFO",
+                    "not installed; managed environment — "
+                    "use `uv pip install ...` if applicable",
                 )
+
             return Check(
-                "pip", "FAIL",
+                "pip",
+                "FAIL",
                 "pip not importable; reinstall Python with ensurepip "
-                "or use a system Python that bundles pip",
+                "or use a Python environment that bundles pip",
             )
+
         return Check(
-            "pip", "FAIL",
-            "pip found but not importable; check venv integrity",
+            "pip",
+            "FAIL",
+            "pip found but not importable; check environment integrity",
         )
 
 
 def _check_arch() -> Check:
-    machine = _platform.machine()  # e.g. x86_64, aarch64, arm64
+    """Check interpreter architecture."""
+
+    machine = _platform.machine()
+
     bits = struct.calcsize("P") * 8
-    return Check("Architecture", "PASS", f"{machine} ({bits}-bit)")
+
+    return Check(
+        "Architecture",
+        "PASS",
+        f"{machine} ({bits}-bit)",
+    )
 
 
-def _check_module(name: str, version_attr: str = "__version__",
-                   import_name: str | None = None,
-                   friendly_name: str | None = None) -> Check:
-    """Check that a module is importable.
+def _check_module(
+    name: str,
+    version_attr: str = "__version__",
+    import_name: str | None = None,
+    friendly_name: str | None = None,
+) -> Check:
+    """Check whether a Python module is importable.
 
-    Some packages (notably pyusb) ship under a different import name than
-    the distribution name; ``import_name`` overrides the import target.
+    Some distribution names differ from import names.
+
+    Examples:
+
+        pyusb -> usb
+        Pillow -> PIL
+        PyYAML -> yaml
     """
+
     target = import_name or name
+
     label = friendly_name or name
+
     try:
         mod = __import__(target)
-        ver = getattr(mod, version_attr, "?")
-        return Check(label, "PASS", str(ver))
+
+        version = getattr(
+            mod,
+            version_attr,
+            "?",
+        )
+
+        return Check(
+            label,
+            "PASS",
+            str(version),
+        )
+
     except ImportError:
         return Check(
-            label, "FAIL",
-            f"not installed; reinstall with `pip install codebot`",
+            label,
+            "FAIL",
+            f"not installed; reinstall with "
+            f"`pip install codebot`",
         )
 
 
-def _check_libusb() -> Check:
-    """Per-platform libusb load check.
+def _check_usb_backend() -> Check:
+    """Check whether PyUSB has a usable backend.
 
-    Linux:  ctypes.util.find_library('usb-1.0') + CDLL probe
-    macOS:  pyusb 自动用 IOKit, 不需要 libusb
-    Windows: 尝试 vendor .dll, 失败回退到 WinUSB
+    This is intentionally a runtime check through PyUSB itself.
+
+    The important question is not whether a platform theoretically needs
+    libusb, but whether the exact current Python + PyUSB environment can
+    actually obtain a USB backend.
+
+    This matches the behavior used by usb.core.find().
     """
-    if sys.platform == "darwin":
-        # IOKit backend, no libusb required
+
+    try:
+        import usb.backend.libusb1
+
+    except ImportError as e:
         return Check(
-            "libusb", "PASS",
-            "not required on macOS (pyusb uses IOKit backend)",
+            "USB backend",
+            "FAIL",
+            f"PyUSB libusb backend is unavailable: {e}",
         )
 
-    if sys.platform.startswith("linux"):
-        so_name = ctypes.util.find_library("usb-1.0")
-        if not so_name:
-            return Check(
-                "libusb", "FAIL",
-                "libusb-1.0.so.0 not found. Install: "
-                "`sudo apt install libusb-1.0-0` (Debian/Ubuntu) | "
-                "`sudo dnf install libusb` (Fedora) | "
-                "`sudo apk add libusb` (Alpine). "
-                "Or run: `codebotd setup-driver`",
-            )
-        try:
-            ctypes.CDLL(so_name)
-            return Check("libusb", "PASS", f"loaded {so_name}")
-        except OSError as e:
-            return Check(
-                "libusb", "FAIL",
-                f"found {so_name} but CDLL load failed: {e}",
+    try:
+        backend = usb.backend.libusb1.get_backend()
+
+    except Exception as e:
+        return Check(
+            "USB backend",
+            "FAIL",
+            f"failed to initialize libusb backend: {e}",
+        )
+
+    if backend is None:
+        if sys.platform == "darwin":
+            hint = "Install libusb with: `brew install libusb`"
+
+        elif sys.platform.startswith("linux"):
+            hint = (
+                "Install libusb, for example: "
+                "`sudo apt install libusb-1.0-0`"
             )
 
-    if sys.platform == "win32":
-        # Try vendor .dll first (Windows-x86_64 / Windows-x86)
-        try:
-            # Python 3.8 lacks importlib.resources.files — use the backport
-            # there (declared as a conditional dep in pyproject.toml).
-            try:
-                from importlib.resources import files
-            except ImportError:  # pragma: no cover — only on Python < 3.9
-                from importlib_resources import files  # type: ignore[no-redef]
-            vendor = files("codebot._vendor.libusb")
-            arch = "windows-x86_64" if struct.calcsize("P") == 8 else "windows-x86"
-            dll_path = str(vendor / arch / "libusb-1.0.dll")
-            os.add_dll_directory(os.path.dirname(dll_path))
-            ctypes.CDLL(dll_path)
-            return Check("libusb", "PASS", f"loaded vendor {dll_path}")
-        except (ImportError, OSError, FileNotFoundError) as e:
-            # WinUSB backend works without libusb.dll
-            return Check(
-                "libusb", "INFO",
-                f"vendor dll not loaded ({e}); WinUSB backend will be used",
+        elif sys.platform == "win32":
+            hint = (
+                "Install the bundled libusb backend or configure "
+                "a supported Windows USB backend"
             )
 
-    return Check("libusb", "INFO", f"platform {sys.platform} untested")
+        else:
+            hint = "Install a supported PyUSB backend"
+
+        return Check(
+            "USB backend",
+            "FAIL",
+            f"PyUSB could not find a usable libusb backend. {hint}",
+        )
+
+    return Check(
+        "USB backend",
+        "PASS",
+        "libusb backend available",
+    )
 
 
 def _check_usb_device() -> Check:
-    """Try to enumerate Code Bot device VID=0x1A86 PID=0xCB0B."""
+    """Try to enumerate the Code Bot USB device."""
+
     try:
-        import usb.core  # noqa: F401
+        import usb.core
+
     except ImportError:
         return Check(
-            "USB device scan", "INFO",
-            "pyusb not importable; skipping enumeration",
+            "USB device scan",
+            "FAIL",
+            "pyusb is not importable; cannot enumerate USB devices",
         )
+
     try:
-        import usb.core as _uc
-        dev = _uc.find(idVendor=0x1A86, idProduct=0xCB0B)
-        if dev is None:
-            return Check(
-                "USB device scan", "INFO",
-                "Code Bot device (0x1A86:0xCB0B) not found; "
-                "plug in device or run with sim-only",
-            )
-        return Check(
-            "USB device scan", "PASS",
-            f"found device bus={dev.bus} addr={dev.address}",
+        dev = usb.core.find(
+            idVendor=USB_VENDOR_ID,
+            idProduct=USB_PRODUCT_ID,
         )
+
+    except usb.core.NoBackendError as e:
+        return Check(
+            "USB device scan",
+            "FAIL",
+            f"no USB backend available: {e}",
+        )
+
     except Exception as e:
         return Check(
-            "USB device scan", "INFO",
-            f"enumeration failed: {e} (sim-only mode will still work)",
+            "USB device scan",
+            "FAIL",
+            f"USB enumeration failed: {e}",
         )
+
+    if dev is None:
+        return Check(
+            "USB device scan",
+            "INFO",
+            (
+                f"Code Bot device "
+                f"(0x{USB_VENDOR_ID:04X}:0x{USB_PRODUCT_ID:04X}) "
+                "not found; plug in the device or run with sim-only"
+            ),
+        )
+
+    return Check(
+        "USB device scan",
+        "PASS",
+        f"found device bus={dev.bus} addr={dev.address}",
+    )
 
 
 CHECKS: list[Callable[[], Check]] = [
     _check_python,
     _check_pip,
     _check_arch,
-    # pyusb is the PyPI package name; the import target is `usb`.
-    lambda: _check_module("pyusb", import_name="usb", friendly_name="pyusb (as usb)"),
+
+    lambda: _check_module(
+        "pyusb",
+        import_name="usb",
+        friendly_name="pyusb (as usb)",
+    ),
+
     lambda: _check_module("psutil"),
     lambda: _check_module("PIL"),
     lambda: _check_module("yaml"),
     lambda: _check_module("click"),
     lambda: _check_module("platformdirs"),
-    _check_libusb,
+
+    _check_usb_backend,
     _check_usb_device,
 ]
 
 
 def run_doctor(verbose: bool = True) -> int:
-    """Run all checks; return 0 if no FAIL, 1 otherwise."""
+    """Run all environment checks.
+
+    Returns:
+        0: no FAIL checks
+        1: at least one FAIL check
+    """
+
     if verbose:
-        print(f"codebotd doctor — environment diagnostics")
-        print(f"  platform: {sys.platform} ({_platform.platform()})")
-        print(f"  prefix:   {sys.prefix}")
+        print("codebotd doctor — environment diagnostics")
+
+        print(
+            f"  platform: {_platform.platform()} "
+            f"({sys.platform})"
+        )
+
+        print(
+            f"  prefix:   {sys.prefix}"
+        )
+
+        print(
+            f"  python:   {sys.executable}"
+        )
+
         print("")
 
     fail_count = 0
+
     for check_fn in CHECKS:
-        c = check_fn()
+        try:
+            check = check_fn()
+
+        except Exception as e:
+            # A diagnostic check itself should not crash the whole doctor.
+            check = Check(
+                "internal diagnostic error",
+                "FAIL",
+                f"{check_fn.__name__}: {e}",
+            )
+
         if verbose:
-            print(c.render())
-        if c.status == "FAIL":
+            print(check.render())
+
+        if check.status == "FAIL":
             fail_count += 1
 
     if verbose:
         print("")
+
         if fail_count == 0:
             print("  All checks PASSED (or INFO).")
+
             return 0
-        print(f"  {fail_count} check(s) FAILED. See hints above.")
+
+        print(
+            f"  {fail_count} check(s) FAILED. "
+            "See hints above."
+        )
+
         return 1
 
     return 1 if fail_count else 0
