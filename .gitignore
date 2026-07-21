@@ -45,3 +45,5 @@ coverage.xml
 
 # Logs
 *.log
+
+src/codebot/_version.py

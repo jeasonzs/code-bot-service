@@ -1,10 +1,14 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = [
+    "setuptools>=64",
+    "setuptools-scm",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "codebot"
-version = "0.17"
+dynamic = ["version"]
 description = "Code Bot - USB info display host daemon for CH32X033F8P6"
 authors = [{name = "Code Bot Project"}]
 readme = "README.md"
@@ -29,8 +33,6 @@ dependencies = [
     "PyYAML>=6.0",
     "click>=8.1.0",
     "platformdirs>=4.0",
-    # Python 3.8 lacks `importlib.resources.files` (added in 3.9); backport it
-    # only on the affected versions so 3.9+ users don't pull an extra dep.
     'importlib_resources>=1.3; python_version < "3.9"',
 ]
 
@@ -44,10 +46,6 @@ dev = [
 
 [project.scripts]
 codebotd = "codebot.cli:main"
-# Console scripts that Claude Code invokes from its hook configuration.
-# Available on PATH after `pip install codebot` on every platform
-# (Windows / macOS / Linux). Claude Code's hook.command runs in the
-# system shell which searches PATH, so we never hardcode a path here.
 codebot-claude-statusline = "codebot.claude_integration.statusline:main"
 codebot-claude-status-hook = "codebot.claude_integration.hook:main"
 
@@ -61,15 +59,14 @@ codebot = [
     "icons/*.png",
     "udev/*.rules",
     "windows/*.inf",
-    # Service-unit templates (filled at install time via `codebotd setup`).
-    # `.in` suffix is the autoconf/CMake convention — install code does the
-    # @CODEBOTD_PATH@ substitution before writing to ~/.config/systemd/user
-    # or ~/Library/LaunchAgents.
     "systemd/*.service.in",
     "launchd/*.plist.in",
-    # P3.3: Windows vendor libusb.dll (fallback when WinUSB unavailable)
     "_vendor/libusb/windows-*/*.dll",
 ]
+
+[tool.setuptools_scm]
+# 可选：将版本信息写入 Python 文件，运行时可以读取
+version_file = "src/codebot/_version.py"
 
 [tool.black]
 line-length = 100
