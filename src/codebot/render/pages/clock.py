@@ -52,7 +52,7 @@ class ClockPage(BasePage):
         date_str = "{0}年{1}月{2}日 {3}".format(
             now.year, now.month, now.day, _WEEKDAY_ZH[now.weekday()]
         )
-        date_font = get_font("cjk", 18)
+        date_font = get_font("cjk", 24)
         d.text((_LEFT_PAD, 10), date_str,
                fill=(VSCodeDark.INFO.r, VSCodeDark.INFO.g, VSCodeDark.INFO.b),
                font=date_font)

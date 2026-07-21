@@ -48,29 +48,29 @@ class VSCodeDark:
     FG_DISABLED = Color(90, 90, 90)       # #5A5A5A
 
     # Status
-    SUCCESS     = Color(78, 201, 176)     # #4EC9B0
+    SUCCESS     = Color(140, 235, 210)    # #8CEBD2
     WARNING     = Color(220, 220, 170)    # #DCDCAA
     DANGER      = Color(244, 71, 71)      # #F44747
-    INFO        = Color(86, 156, 214)      # #569CD6
+    INFO        = Color(140, 210, 250)    # #8CD2FA
 
     # Syntax (for rendered text labels)
-    SYN_KEYWORD = Color(86, 156, 214)     # #569CD6
+    SYN_KEYWORD = Color(140, 210, 250)    # #8CD2FA (= INFO)
     SYN_STRING  = Color(206, 145, 120)    # #CE9178
     SYN_NUMBER  = Color(181, 206, 168)    # #B5CEA8
     SYN_COMMENT = Color(106, 153, 85)     # #6A9955
     SYN_FUNC    = Color(220, 220, 170)    # #DCDCAA
     SYN_VAR     = Color(156, 220, 254)    # #9CDCFE
-    SYN_TYPE    = Color(78, 201, 176)     # #4EC9B0
+    SYN_TYPE    = Color(140, 235, 210)    # #8CEBD2 (= SUCCESS)
 
     # Page indicator
-    INDICATOR_BASE    = Color(86, 156, 214)    # #569CD6
+    INDICATOR_BASE    = Color(140, 210, 250)    # #8CD2FA (= INFO)
     INDICATOR_ACTIVE  = Color(220, 220, 170)    # #DCDCAA
 
     # Dashboard tile accents (SystemPage 2x2 grid)
     MEM_ACCENT        = Color(197, 134, 192)    # #C586C0 (VSCode purple)
-    NET_UP            = Color(78, 201, 176)     # #4EC9B0 (= SUCCESS)
+    NET_UP            = Color(140, 235, 210)    # #8CEBD2 (= SUCCESS)
     NET_DOWN          = Color(86, 192, 230)     # #56C0E6 (cyan)
-    FREQ_ACCENT       = Color(86, 156, 214)     # #569CD6 (= INFO)
+    FREQ_ACCENT       = Color(140, 210, 250)    # #8CD2FA (= INFO)
 
     # Dotted-bar "off" cell color (slightly above BG)
     BAR_DIM           = Color(50, 50, 50)       # #323232

@@ -43,8 +43,8 @@ CELL_W = SCREEN_W // 2
 # Color choices match the rest of the UI's status vocabulary.
 _STATUS_COLOR = {
     "idle":       VSCodeDark.FG_DIM,
-    "thinking":   VSCodeDark.INFO,
-    "tool":       VSCodeDark.SUCCESS,
+    "thinking":   VSCodeDark.SUCCESS,
+    "tool":       VSCodeDark.INFO,
     "permission": VSCodeDark.WARNING,
     "stopped":    VSCodeDark.FG_DISABLED,
     "error":      VSCodeDark.DANGER,
