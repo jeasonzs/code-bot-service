@@ -104,6 +104,15 @@ class Daemon:
         # 主循环统一 drain → _handle_touch, 避免 _handle_touch 跨线程调用
         self._touch_queue: queue.Queue = queue.Queue()
 
+        # USB hot-plug supervisor: 后台线程,设备掉线后按指数退避自动重连。
+        # 主循环不直接重枚举,只通过 send_frame 失败时 UsbTransport.mark_closed()
+        # 把 is_open 置 False,supervisor 看到后调用 _find_and_open。
+        self._usb_supervisor: Optional[threading.Thread] = None
+        # 设备重连后 supervisor 要发 brightness+clear 复位 LCD,这期间主循环
+        # 不能并发 _flush_to_device (会闪屏)。True = supervisor 持有中,flush 让路。
+        # 必须在 _find_and_open 之前置 True,关闭 is_open 翻转 → 主循环观察的窗口。
+        self._usb_resyncing: bool = False
+
         # P3.2: dual-fan architecture — both channels always started.
         # USB.open() is attempted lazily in run(); if device missing, sim
         # still serves the user.
@@ -142,6 +151,44 @@ class Daemon:
             if attempt < 2:
                 time.sleep(0.5)
         return False
+
+    def _supervise_usb(self) -> None:
+        """Background thread: 设备掉线后自动重连。
+
+        与主循环解耦:
+          - 主循环负责 *检测* 断线 (send_frame 失败 → UsbTransport.mark_closed)
+          - supervisor 负责 *恢复* (看到 is_open=False 就调 _find_and_open)
+          - 恢复期间持 _usb_resyncing,关闭 _flush_to_device 并发路径 (防闪屏)
+        """
+        backoff = 1.0
+        while not self._stop.is_set():
+            if self._usb.is_open:
+                # 设备健康:每秒看一眼,失败重置退避
+                backoff = 1.0
+                self._stop.wait(1.0)
+                continue
+            # _find_and_open 会把 is_open 翻成 True;之前先占住 _usb_resyncing,
+            # 否则主循环可能在两个语句之间观察到 is_open=True → 并发 flush → 闪屏。
+            # find_and_open 失败时也没害处 (主循环的 is_open 早已是 False,不会 flush)。
+            self._usb_resyncing = True
+            try:
+                if self._find_and_open():
+                    log.info("USB device reconnected; resyncing screen")
+                    # 跟初始启动一致: brightness + clear 让 LCD 进入已知状态,
+                    # 然后强制下一帧 find_dirty_rects 返回全幅 (mark_all_dirty),
+                    # 否则 diff 命中"canvas 跟 _prev_image 一致"→ [] → 设备 LCD 残留旧图。
+                    if self._usb.send_frame(build_set_brightness(80)):
+                        self._stop.wait(0.1)
+                        self._usb.send_frame(build_clear(0x0000))
+                    self._canvas.mark_all_dirty()
+                    backoff = 1.0
+                    self._stop.wait(1.0)
+                else:
+                    log.debug("USB reconnect failed; retry in %.1fs", backoff)
+                    self._stop.wait(backoff)
+                    backoff = min(backoff * 2, 5.0)
+            finally:
+                self._usb_resyncing = False
 
     def _handle_touch(self, event_type: int, x: int, y: int) -> None:
         """Process a touch event from the device.
@@ -216,6 +263,11 @@ class Daemon:
           2. EP5 OUT: raw pixel data (64B/包, 任意包数)
           3. EP1 OUT: DRAW_RECT_END  (1B, 必须发: 固件 stateless, host 不发 CS 不拉高)
         """
+        if self._usb_resyncing or not self._usb.is_open:
+            # supervisor 重连后正在发 brightness+clear 让 LCD 复位;
+            # 这期间主循环并发 flush 会让 BEGIN+pixels 跟 clear 撞在一起 → 闪屏。
+            # 等 supervisor 完成 (清 _usb_resyncing) 再 flush。
+            return
         rects = self._canvas.find_dirty_rects()
         if not rects:
             return
@@ -223,12 +275,19 @@ class Daemon:
         n_ok = 0
         n_err = 0
         for r in rects:
+            # 设备可能在上一轮 send_frame 后被 mark_closed (掉线)
+            if not self._usb.is_open:
+                log.warning("USB device disconnected mid-flush; aborting remaining rects")
+                break
             # 1. 发 BEGIN (开窗 + 打开 EP5 OUT 数据通道)
             if not self._usb.send_frame(
                 build_draw_rect_begin(r.x, r.y, r.w, r.h),
                 timeout=500,
             ):
                 n_err += 1
+                if not self._usb.is_open:
+                    # send_frame 内部已 mark_closed,supervisor 接管
+                    break
                 self._usb.send_frame(build_draw_rect_abort(), timeout=200)
                 continue
 
@@ -241,6 +300,8 @@ class Daemon:
                     r.x, r.y, r.w, r.h, written, expected,
                 )
                 n_err += 1
+                if not self._usb.is_open:
+                    break
                 self._usb.send_frame(build_draw_rect_abort(), timeout=200)
                 continue
 
@@ -251,6 +312,8 @@ class Daemon:
                     r.x, r.y, r.w, r.h
                 )
                 n_err += 1
+                if not self._usb.is_open:
+                    break
                 continue
 
             n_ok += 1
@@ -339,9 +402,19 @@ class Daemon:
         else:
             log.warning(
                 "Code Bot USB device not found; running in sim-only mode. "
-                "Plug in the device and restart, or run `codebotd setup-driver` "
-                "to install the OS-level driver/permissions."
+                "Plug in the device — supervisor will auto-connect — or run "
+                "`codebotd setup-driver` to install the OS-level driver/permissions."
             )
+
+        # Hot-plug supervisor: 后台线程,设备掉线 → 指数退避重连。
+        # 不论初始是否找到设备都启动;初始失败时它会持续尝试。
+        self._usb_supervisor = threading.Thread(
+            target=self._supervise_usb,
+            daemon=True,
+            name="usb-supervisor",
+        )
+        self._usb_supervisor.start()
+        log.info("USB supervisor started (auto-reconnect enabled)")
 
         # Start collectors
         self._sys_collector.start()
@@ -354,7 +427,8 @@ class Daemon:
         last_render = 0.0
         last_collect_refresh = 0.0
         # sim 8fps 省 CPU / 带宽, USB 15fps 让画面顺
-        render_hz = 8 if not self._usb.is_open else 15
+        # 动态求值: 设备重连后立即切换到 15fps,断开后回到 8fps
+        last_render_hz = 0
 
         log.info("Daemon running. Press Ctrl+C to stop.")
         try:
@@ -364,7 +438,12 @@ class Daemon:
                 self._drain_touch_queue()
                 if self._usb.is_open:
                     self._poll_usb()
-                # Render at fixed rate
+                # Render at fixed rate (动态 render_hz, 设备状态变了立即切换)
+                render_hz = 15 if self._usb.is_open else 8
+                if render_hz != last_render_hz:
+                    log.info("Render rate: %d Hz (USB %s)",
+                             render_hz, "connected" if self._usb.is_open else "disconnected")
+                    last_render_hz = render_hz
                 if now - last_render >= 1.0 / render_hz:
                     self._render_loop()
                     last_render = now
@@ -386,6 +465,10 @@ class Daemon:
                 self._sim.stop()
             if self._usb is not None:
                 self._usb.close()
+            # 等待 supervisor 线程退出 (daemon=True 主线程退出时也会被强杀,
+            # 但 _stop 已 set,正常路径下它会自然退出)
+            if self._usb_supervisor is not None:
+                self._usb_supervisor.join(timeout=2.0)
             # P4.1: stop control server + clean up PID file
             try:
                 control.stop()

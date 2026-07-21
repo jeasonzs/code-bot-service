@@ -121,3 +121,13 @@ class Canvas:
     def mark_clean(self) -> None:
         """Mark current image as the new baseline for diffing."""
         self._prev_image = self.image.copy()
+
+    def mark_all_dirty(self) -> None:
+        """Force next find_dirty_rects() to return a full-screen rect.
+
+        Used after device reconnect: the device LCD has stale content
+        from before disconnect, but _prev_image only knows about the
+        pre-disconnect state. A normal diff would return [] or partial
+        rects and leave the device LCD out of sync.
+        """
+        self._prev_image = None

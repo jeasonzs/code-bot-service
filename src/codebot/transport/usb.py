@@ -187,6 +187,12 @@ class UsbTransport:
 
         self._rx_lock = threading.Lock()
         self._tx_lock = threading.Lock()
+        # State lifecycle lock: serializes open()/close()/mark_closed() and
+        # guards the _dev/_ep_* refs. Used together with the snapshot
+        # pattern in send_frame/poll to avoid races with the supervisor
+        # thread that reopens the device on disconnect. RLock so a future
+        # caller can hold it across nested ops without deadlocking.
+        self._state_lock = threading.RLock()
         self._last_touch: Optional[TouchReport] = None
 
     # ----- Discovery -----
@@ -215,58 +221,106 @@ class UsbTransport:
 
     # ----- Open/close -----
     def open(self) -> bool:
-        """Open device, claim interfaces 0 (Vendor) and 1 (HID), wire up endpoints."""
-        self._dev = usb_core.find(
-            idVendor=self.vid,
-            idProduct=self.pid,
-            backend=self._backend,
-        )
-        if self._dev is None:
-            return False
+        """Open device, claim interfaces 0 (Vendor) and 1 (HID), wire up endpoints.
 
-        # Detach kernel driver on each interface before claiming (Linux)
-        for iface in (VENDOR_INTERFACE, HID_INTERFACE):
+        Idempotent: if a prior device handle exists, it is closed first.
+        On any failure mid-way, all refs are nulled so the caller can retry.
+        """
+        with self._state_lock:
+            self._close_unlocked()
+            dev = usb_core.find(
+                idVendor=self.vid,
+                idProduct=self.pid,
+                backend=self._backend,
+            )
+            if dev is None:
+                return False
+
             try:
-                if self._dev.is_kernel_driver_active(iface):
-                    self._dev.detach_kernel_driver(iface)
-            except (NotImplementedError, usb_core.USBError):
-                pass
+                # Detach kernel driver on each interface before claiming (Linux)
+                for iface in (VENDOR_INTERFACE, HID_INTERFACE):
+                    try:
+                        if dev.is_kernel_driver_active(iface):
+                            dev.detach_kernel_driver(iface)
+                    except (NotImplementedError, usb_core.USBError):
+                        pass
 
-        # Set configuration (idempotent)
-        try:
-            self._dev.set_configuration()
-        except usb_core.USBError:
-            pass
-
-        # Claim Vendor + HID interfaces
-        for iface in (VENDOR_INTERFACE, HID_INTERFACE):
-            try:
-                usb_util.claim_interface(self._dev, iface)
-            except usb_core.USBError:
+                # Set configuration (idempotent)
                 try:
-                    if self._dev.is_kernel_driver_active(iface):
-                        self._dev.detach_kernel_driver(iface)
-                    usb_util.claim_interface(self._dev, iface)
-                except (NotImplementedError, usb_core.USBError):
+                    dev.set_configuration()
+                except usb_core.USBError:
                     pass
 
-        # Wire up endpoints by address
-        cfg = self._dev.get_active_configuration()
-        for ep in cfg[(VENDOR_INTERFACE, 0)]:
-            addr = ep.bEndpointAddress
-            if addr == 0x01:
-                self._ep_out = ep
-            elif addr == 0x82:
-                self._ep_in = ep
-            elif addr == 0x05:
-                self._ep_data = ep
-        for ep in cfg[(HID_INTERFACE, 0)]:
-            if usb_util.endpoint_direction(ep.bEndpointAddress) == usb_util.ENDPOINT_IN:
-                self._ep_hid = ep
-        return True
+                # Claim Vendor + HID interfaces
+                for iface in (VENDOR_INTERFACE, HID_INTERFACE):
+                    try:
+                        usb_util.claim_interface(dev, iface)
+                    except usb_core.USBError:
+                        try:
+                            if dev.is_kernel_driver_active(iface):
+                                dev.detach_kernel_driver(iface)
+                            usb_util.claim_interface(dev, iface)
+                        except (NotImplementedError, usb_core.USBError):
+                            pass
+
+                # Wire up endpoints by address
+                cfg = dev.get_active_configuration()
+                ep_out = ep_in = ep_data = ep_hid = None
+                for ep in cfg[(VENDOR_INTERFACE, 0)]:
+                    addr = ep.bEndpointAddress
+                    if addr == 0x01:
+                        ep_out = ep
+                    elif addr == 0x82:
+                        ep_in = ep
+                    elif addr == 0x05:
+                        ep_data = ep
+                for ep in cfg[(HID_INTERFACE, 0)]:
+                    if usb_util.endpoint_direction(ep.bEndpointAddress) == usb_util.ENDPOINT_IN:
+                        ep_hid = ep
+
+                if ep_out is None:
+                    log.warning("Device opened but EP1 OUT endpoint not found")
+                    self._close_unlocked()
+                    return False
+
+                # Commit refs atomically under lock
+                self._dev = dev
+                self._ep_out = ep_out
+                self._ep_in = ep_in
+                self._ep_data = ep_data
+                self._ep_hid = ep_hid
+                return True
+            except Exception:
+                log.exception("open() failed; cleaning up")
+                # Try to release the half-claimed device before bailing
+                self._dev = dev
+                self._ep_out = None
+                self._close_unlocked()
+                return False
 
     def close(self) -> None:
-        """Release interfaces and close device."""
+        """Release interfaces and close device. Idempotent."""
+        with self._state_lock:
+            self._close_unlocked()
+
+    def mark_closed(self) -> None:
+        """Lightweight close for the disconnect path.
+
+        Called by send_frame / write_pixels / poll when they detect
+        ENODEV/ENOENT — the device is already physically gone, so we skip
+        release_interface / dispose_resources (which would raise on a
+        dead handle) and just null the refs. Supervisor thread will see
+        is_open == False and reopen with backoff.
+        """
+        with self._state_lock:
+            self._dev = None
+            self._ep_out = None
+            self._ep_in = None
+            self._ep_data = None
+            self._ep_hid = None
+
+    def _close_unlocked(self) -> None:
+        """Inner close — caller MUST hold _state_lock."""
         if self._dev is not None:
             for iface in (VENDOR_INTERFACE, HID_INTERFACE):
                 try:
@@ -277,11 +331,11 @@ class UsbTransport:
                 usb_util.dispose_resources(self._dev)
             except usb_core.USBError:
                 pass
-            self._dev = None
-            self._ep_out = None
-            self._ep_in = None
-            self._ep_data = None
-            self._ep_hid = None
+        self._dev = None
+        self._ep_out = None
+        self._ep_in = None
+        self._ep_data = None
+        self._ep_hid = None
 
     @property
     def is_open(self) -> bool:
@@ -290,23 +344,32 @@ class UsbTransport:
     # ----- Send control frame (EP1 OUT) -----
     def send_frame(self, frame: Frame, timeout: int = 1000) -> bool:
         """Send a control frame to the device via EP1 OUT (cmd + struct)."""
-        if not self.is_open:
-            return False
+        # Snapshot the endpoint under state lock so a concurrent close()
+        # from the supervisor doesn't leave us with a stale reference.
+        with self._state_lock:
+            if self._ep_out is None:
+                return False
+            ep_out = self._ep_out
         data = frame.encode()
         if len(data) > 64:
             raise ValueError(f"frame too large for v3 single-packet protocol: {len(data)} > 64")
         with self._tx_lock:
             try:
-                self._ep_out.write(data, timeout=timeout)
+                ep_out.write(data, timeout=timeout)
                 return True
             except usb_core.USBError as e:
-                if e.errno in (None, 5, 19, 32) or "Pipe" in str(e) or "timed out" in str(e).lower():
+                # ENODEV (32) / ENOENT (19) → device physically gone.
+                # Mark closed so supervisor reconnects; no point retrying.
+                if e.errno in (19, 32) or "No such device" in str(e):
+                    self.mark_closed()
+                    return False
+                if e.errno in (None, 5) or "Pipe" in str(e) or "timed out" in str(e).lower():
                     try:
-                        self._ep_out.clear_halt()
+                        ep_out.clear_halt()
                     except usb_core.USBError:
                         return False
                     try:
-                        self._ep_out.write(data, timeout=timeout)
+                        ep_out.write(data, timeout=timeout)
                         return True
                     except usb_core.USBError:
                         return False
@@ -327,14 +390,18 @@ class UsbTransport:
         Returns number of bytes written. Caller must have already sent
         DRAW_RECT_BEGIN on EP1 OUT; the device NAKs EP5 OUT until BEGIN.
         """
-        if not self.is_open or self._ep_data is None:
-            return 0
+        with self._state_lock:
+            if self._ep_data is None:
+                return 0
+            ep_data = self._ep_data
         written = 0
         with self._tx_lock:
             try:
-                self._ep_data.write(data, timeout=1000)
+                ep_data.write(data, timeout=1000)
                 written += len(data)
-            except usb_core.USBError:
+            except usb_core.USBError as e:
+                if e.errno in (19, 32) or "No such device" in str(e):
+                    self.mark_closed()
                 return written
         return written
 
@@ -346,15 +413,19 @@ class UsbTransport:
         touch events). The host does NOT need to send keystroke commands. This
         method is kept for backward compatibility / debugging.
         """
-        if not self.is_open or self._ep_hid is None:
-            return False
+        with self._state_lock:
+            if self._ep_hid is None:
+                return False
+            ep_hid = self._ep_hid
         if len(report) != 8:
             raise ValueError(f"HID report must be 8 bytes, got {len(report)}")
         with self._tx_lock:
             try:
-                self._ep_hid.write(report, timeout=timeout)
+                ep_hid.write(report, timeout=timeout)
                 return True
-            except usb_core.USBError:
+            except usb_core.USBError as e:
+                if e.errno in (19, 32) or "No such device" in str(e):
+                    self.mark_closed()
                 return False
 
     # ----- Receive (EP2 IN) -----
@@ -364,13 +435,17 @@ class UsbTransport:
         v3: each USB packet is exactly one frame (no stream parsing needed).
         Returns list of decoded frames (may be empty on timeout).
         """
-        if not self.is_open:
-            return []
+        with self._state_lock:
+            if self._ep_in is None:
+                return []
+            ep_in = self._ep_in
         try:
-            data = self._ep_in.read(64, timeout=timeout_ms)
+            data = ep_in.read(64, timeout=timeout_ms)
         except usb_core.USBTimeoutError:
             return []
-        except usb_core.USBError:
+        except usb_core.USBError as e:
+            if e.errno in (19, 32) or "No such device" in str(e):
+                self.mark_closed()
             return []
 
         if not data:
