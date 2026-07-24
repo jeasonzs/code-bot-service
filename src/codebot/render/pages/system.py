@@ -3,7 +3,7 @@
 Layout (see plan doc):
   y=0-25    header: `>_ CODEBOT` + HH:MM
   y=26-98   CPU | FREQ tiles
-  y=99-146  MEM | DISK-free tiles
+  y=99-146  MEM | GPU (有数据时) / DISK-free tiles
   y=147-172 footer: `>_` + net up/down + disk io
 
 The tile / footer rendering is delegated to reusable view classes in
@@ -124,14 +124,25 @@ class SystemPage(BasePage):
             bar_pct=max(0.0, min(100.0, snap.mem_pct)),
             bar_color=VSCodeDark.MEM_ACCENT,
         ).draw(canvas)
-        # DISK free-space cell (x=160..319, y=72..144)
-        TileView(
-            x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
-            icon="disk", icon_color=VSCodeDark.NET_UP,
-            title="DISK", title_color=VSCodeDark.NET_UP,
-            value_digits="{0:.0f}".format(snap.disk_free_gb), value_unit="GB",
-            unit_color=VSCodeDark.FG_DIM,
-        ).draw(canvas)
+        # 右下格: 有 GPU 数据时显示 GPU 使用率, 否则显示磁盘剩余空间
+        # (x=160..319, y=72..144)
+        if snap.gpu_pct is not None:
+            TileView(
+                x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
+                icon="cpu", icon_color=VSCodeDark.NET_UP,
+                title="GPU", title_color=VSCodeDark.NET_UP,
+                value_digits="{0:.0f}".format(snap.gpu_pct), value_unit="%",
+                bar_pct=max(0.0, min(100.0, snap.gpu_pct)),
+                bar_color=VSCodeDark.NET_UP,
+            ).draw(canvas)
+        else:
+            TileView(
+                x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
+                icon="disk", icon_color=VSCodeDark.NET_UP,
+                title="DISK", title_color=VSCodeDark.NET_UP,
+                value_digits="{0:.0f}".format(snap.disk_free_gb), value_unit="GB",
+                unit_color=VSCodeDark.FG_DIM,
+            ).draw(canvas)
 
     @staticmethod
     def _draw_footer(canvas: Canvas, snap) -> None:

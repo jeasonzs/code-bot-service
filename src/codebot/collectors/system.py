@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import os
 import psutil
+import re
+import shutil
+import subprocess
+import sys
 import time
 import threading
 from dataclasses import dataclass, asdict
@@ -16,6 +20,7 @@ class SystemSnapshot:
     cpu_freq_mhz: float
     cores_logical: int
     cpu_temp_c: Optional[float]
+    gpu_pct: Optional[float]
     mem_pct: float
     mem_used_gb: float
     mem_total_gb: float
@@ -43,6 +48,18 @@ class SystemCollector:
         self._last_net = psutil.net_io_counters()
         self._last_disk = psutil.disk_io_counters()
         self._last_time = 0.0
+        # GPU 采样方式按平台探测一次:
+        #   linux  -> nvidia-smi (仅 NVIDIA)
+        #   darwin -> ioreg IOAccelerator 的 "Device Utilization %" (免 sudo,
+        #             Intel/Apple Silicon 都有; powermetrics 要 root 不用)
+        #   windows -> 不实现, gpu_pct 恒为 None
+        self._gpu_mode: Optional[str] = None
+        if sys.platform.startswith("linux") and shutil.which("nvidia-smi"):
+            self._gpu_mode = "nvidia"
+        elif sys.platform == "darwin":
+            self._gpu_mode = "ioreg"
+        self._gpu_pct: Optional[float] = None
+        self._gpu_ts = 0.0
 
     def start(self) -> None:
         """Start the background sampling thread."""
@@ -129,11 +146,18 @@ class SystemCollector:
         except (AttributeError, OSError):
             pass
 
+        # GPU 走 subprocess (nvidia-smi/ioreg), 比 psutil 调用贵得多,
+        # 限到 1Hz, 其余 tick 复用上次的值
+        if self._gpu_mode is not None and now - self._gpu_ts >= 1.0:
+            self._gpu_pct = self._read_gpu_pct()
+            self._gpu_ts = now
+
         snap = SystemSnapshot(
             cpu_pct=cpu_pct,
             cpu_freq_mhz=cpu_freq,
             cores_logical=cores_logical,
             cpu_temp_c=cpu_temp_c,
+            gpu_pct=self._gpu_pct,
             mem_pct=mem.percent,
             mem_used_gb=mem.used / (1024 ** 3),
             mem_total_gb=mem.total / (1024 ** 3),
@@ -152,6 +176,33 @@ class SystemCollector:
         )
         with self._lock:
             self._latest = snap
+
+    def _read_gpu_pct(self) -> Optional[float]:
+        """Read GPU utilization % via platform command; None on failure."""
+        if self._gpu_mode == "nvidia":
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=utilization.gpu",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=1.0,
+                )
+                if out.returncode == 0:
+                    # 多卡时取第一块
+                    return float(out.stdout.strip().splitlines()[0])
+            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                pass
+        elif self._gpu_mode == "ioreg":
+            try:
+                out = subprocess.run(
+                    ["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"],
+                    capture_output=True, text=True, timeout=1.0,
+                )
+                m = re.search(r'"Device Utilization %"=(\d+)', out.stdout)
+                if m:
+                    return float(m.group(1))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return None
 
     def snapshot(self) -> Optional[SystemSnapshot]:
         """Get the latest snapshot (or None if not sampled yet)."""
