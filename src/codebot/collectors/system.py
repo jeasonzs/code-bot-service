@@ -16,13 +16,14 @@ class SystemSnapshot:
     cpu_freq_mhz: float
     cores_logical: int
     cpu_temp_c: Optional[float]
-    fan_rpm: Optional[int]
     mem_pct: float
     mem_used_gb: float
     mem_total_gb: float
     disk_pct: float
     disk_used_gb: float
+    disk_free_gb: float
     disk_total_gb: float
+    disk_io_rate_kbs: float
     rx_bytes: int
     tx_bytes: int
     rx_rate_kbs: float
@@ -40,6 +41,7 @@ class SystemCollector:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_net = psutil.net_io_counters()
+        self._last_disk = psutil.disk_io_counters()
         self._last_time = 0.0
 
     def start(self) -> None:
@@ -78,7 +80,17 @@ class SystemCollector:
         elapsed = now - self._last_time if self._last_time else 1.0
         rx_rate = (net.bytes_recv - self._last_net.bytes_recv) / max(elapsed, 0.001) / 1024
         tx_rate = (net.bytes_sent - self._last_net.bytes_sent) / max(elapsed, 0.001) / 1024
+        # disk_io_counters() 在无磁盘统计的环境 (某些 VM/容器) 返回 None
+        disk_io = psutil.disk_io_counters()
+        if disk_io is not None and self._last_disk is not None:
+            io_bytes = (disk_io.read_bytes - self._last_disk.read_bytes) + (
+                disk_io.write_bytes - self._last_disk.write_bytes
+            )
+            disk_io_rate = io_bytes / max(elapsed, 0.001) / 1024
+        else:
+            disk_io_rate = 0.0
         self._last_net = net
+        self._last_disk = disk_io
         self._last_time = now
 
         try:
@@ -117,28 +129,21 @@ class SystemCollector:
         except (AttributeError, OSError):
             pass
 
-        fan_rpm: Optional[int] = None
-        try:
-            fans = psutil.sensors_fans()
-            for entries in fans.values():
-                if entries:
-                    fan_rpm = int(entries[0].current)
-                    break
-        except (AttributeError, OSError):
-            pass
-
         snap = SystemSnapshot(
             cpu_pct=cpu_pct,
             cpu_freq_mhz=cpu_freq,
             cores_logical=cores_logical,
             cpu_temp_c=cpu_temp_c,
-            fan_rpm=fan_rpm,
             mem_pct=mem.percent,
             mem_used_gb=mem.used / (1024 ** 3),
             mem_total_gb=mem.total / (1024 ** 3),
             disk_pct=disk.percent,
             disk_used_gb=disk.used / (1024 ** 3),
+            # psutil 的 free 是 f_bavail (非 root 可用), 与 df 的 Avail 一致;
+            # 不能用 total - used, 那样会把 ext4 的 root 预留块算进去
+            disk_free_gb=disk.free / (1024 ** 3),
             disk_total_gb=disk.total / (1024 ** 3),
+            disk_io_rate_kbs=disk_io_rate,
             rx_bytes=net.bytes_recv,
             tx_bytes=net.bytes_sent,
             rx_rate_kbs=rx_rate,

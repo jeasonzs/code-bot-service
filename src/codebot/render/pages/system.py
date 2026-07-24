@@ -2,9 +2,9 @@
 
 Layout (see plan doc):
   y=0-25    header: `>_ CODEBOT` + HH:MM
-  y=26-98   CPU | MEM tiles (big %, dotted bar)
-  y=99-146  NET (up/down split) | FREQ (GHz)
-  y=147-172 footer: `>_` + temp + fan + disk
+  y=26-98   CPU | FREQ tiles
+  y=99-146  MEM | DISK-free tiles
+  y=147-172 footer: `>_` + net up/down + disk io
 
 The tile / footer rendering is delegated to reusable view classes in
 ``render.views.*``; this module just composes them with snapshot data
@@ -107,34 +107,29 @@ class SystemPage(BasePage):
             bar_pct=max(0.0, min(100.0, snap.cpu_pct)),
             bar_color=VSCodeDark.INFO,
         ).draw(canvas)
-        # MEM cell (x=160..319, y=0..72)
+        # FREQ cell (x=160..319, y=0..72)
         TileView(
             x=CELL_W, y=ROW1_Y, w=CELL_W, h=ROW_H,
+            icon="freq", icon_color=VSCodeDark.FREQ_ACCENT,
+            title="FREQ", title_color=VSCodeDark.FREQ_ACCENT,
+            value_digits=_fmt_freq(snap.cpu_freq_mhz), value_unit="GHz",
+            unit_color=VSCodeDark.FG_DIM,
+        ).draw(canvas)
+        # MEM cell (x=0..159, y=72..144)
+        TileView(
+            x=0, y=ROW2_Y, w=CELL_W, h=ROW_H,
             icon="mem", icon_color=VSCodeDark.MEM_ACCENT,
             title="MEM", title_color=VSCodeDark.MEM_ACCENT,
             value_digits="{0:.0f}".format(snap.mem_pct), value_unit="%",
             bar_pct=max(0.0, min(100.0, snap.mem_pct)),
             bar_color=VSCodeDark.MEM_ACCENT,
         ).draw(canvas)
-        # TEMP cell (x=0..159, y=72..144)
-        if snap.cpu_temp_c is not None:
-            temp_digits = "{0:.0f}".format(snap.cpu_temp_c)
-            temp_unit = "\xb0C"  # °
-        else:
-            temp_digits = "—"
-            temp_unit = ""
-        TileView(
-            x=0, y=ROW2_Y, w=CELL_W, h=ROW_H,
-            icon="temp", icon_color=VSCodeDark.NET_UP,
-            title="TEMP", title_color=VSCodeDark.NET_UP,
-            value_digits=temp_digits, value_unit=temp_unit,
-        ).draw(canvas)
-        # FREQ cell (x=160..319, y=72..144)
+        # DISK free-space cell (x=160..319, y=72..144)
         TileView(
             x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
-            icon="freq", icon_color=VSCodeDark.FREQ_ACCENT,
-            title="FREQ", title_color=VSCodeDark.FREQ_ACCENT,
-            value_digits=_fmt_freq(snap.cpu_freq_mhz), value_unit="GHz",
+            icon="disk", icon_color=VSCodeDark.NET_UP,
+            title="DISK", title_color=VSCodeDark.NET_UP,
+            value_digits="{0:.0f}".format(snap.disk_free_gb), value_unit="GB",
             unit_color=VSCodeDark.FG_DIM,
         ).draw(canvas)
 
@@ -147,7 +142,7 @@ class SystemPage(BasePage):
                  "color": VSCodeDark.NET_UP},
                 {"icon": "down", "value": _fmt_rate(snap.rx_rate_kbs),
                  "color": VSCodeDark.NET_DOWN},
-                {"icon": "disk", "value": "{0:.0f}%".format(snap.disk_pct),
+                {"icon": "disk", "value": _fmt_rate(snap.disk_io_rate_kbs),
                  "color": VSCodeDark.NET_UP},
             ],
         ).draw(canvas)
