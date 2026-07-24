@@ -129,7 +129,7 @@ class SystemPage(BasePage):
         if snap.gpu_pct is not None:
             TileView(
                 x=CELL_W, y=ROW2_Y, w=CELL_W, h=ROW_H,
-                icon="cpu", icon_color=VSCodeDark.NET_UP,
+                icon="gpu", icon_color=VSCodeDark.NET_UP,
                 title="GPU", title_color=VSCodeDark.NET_UP,
                 value_digits="{0:.0f}".format(snap.gpu_pct), value_unit="%",
                 bar_pct=max(0.0, min(100.0, snap.gpu_pct)),
@@ -153,7 +153,7 @@ class SystemPage(BasePage):
                  "color": VSCodeDark.NET_UP},
                 {"icon": "down", "value": _fmt_rate(snap.rx_rate_kbs),
                  "color": VSCodeDark.NET_DOWN},
-                {"icon": "disk", "value": _fmt_rate(snap.disk_io_rate_kbs),
+                {"icon": "disk_io", "value": _fmt_rate(snap.disk_io_rate_kbs),
                  "color": VSCodeDark.NET_UP},
             ],
         ).draw(canvas)

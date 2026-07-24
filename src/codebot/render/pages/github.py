@@ -231,11 +231,9 @@ class GithubPage(BasePage):
         ).draw(canvas)
 
         # ---- FOLLOWERS (top-right): count of people following the user ----
-        # Reuses the "streak" bitmap (flame) as a stand-in for "heat /
-        # popularity"; we don't have a dedicated people icon yet.
         TileView(
             x=CELL_W, y=ROW1_Y, w=CELL_W, h=ROW_H,
-            icon="streak", icon_color=VSCodeDark.INFO,
+            icon="follow", icon_color=VSCodeDark.INFO,
             title="Follow", title_color=VSCodeDark.INFO,
             value_digits=_fmt_int(snap.followers if snap else None),
             value_unit="",

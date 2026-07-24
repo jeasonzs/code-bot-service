@@ -10,7 +10,7 @@ Two backends:
     `up` and `down` are used separately in SystemPage).
 
 Kinds backed by bitmaps: cpu, mem, freq, temp, up, down, disk, stars,
-streak, commits, prs, status, context.
+streak, commits, prs, status, context, gpu, follow, disk_io.
 Kinds backed by primitives: terminal, fan.
 """
 
@@ -326,7 +326,7 @@ def draw_icon(
 
     Bitmap-backed kinds (loaded from icons/<name>.png, original colors
     preserved, `color` ignored): cpu, mem, freq, temp, up, down, disk,
-    stars, streak, commits, prs, status, context.
+    stars, streak, commits, prs, status, context, gpu, follow, disk_io.
 
     Primitive-backed kinds: terminal, fan, thermo, net.
 
