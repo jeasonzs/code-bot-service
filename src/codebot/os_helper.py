@@ -2,10 +2,14 @@
 
 Currently holds one entry point, ``run_as_root``, which wraps shell
 commands (install, rm, udevadm, ...) with ``sudo`` when the current
-process isn't already root. The python interpreter we're running lives
-in the user's env (venv / ``~/.local/``) and does NOT have ``codebot``
-importable under root, so we never ``sudo`` python — only the specific
-shell commands that need root for filesystem / device-mgr reasons.
+process isn't already root.
+
+The python interpreter we're running lives in the user's env (venv /
+``~/.local/``) and does NOT have ``codebot`` importable under root, so
+we never ``sudo`` python — only the specific shell commands that need
+root for filesystem / device-mgr reasons. This is why
+``codebotd setup`` is meant to be run as the invoking user: sudo
+would re-exec into root's env and break imports.
 
 Scope is intentionally POSIX-only: macOS and Linux both have
 ``os.geteuid()`` and ``sudo``, so the helper works on both. Windows uses

@@ -45,7 +45,6 @@ DEFAULT_CONFIG_PATH: Path = Path.home() / ".code_bot" / "config.yml"
 DEFAULTS: dict[str, Any] = {
     "github": {
         "token":   "__REPLACE_ME__",   # GitHub PAT (env GITHUB_TOKEN overrides)
-        "ci_repo": "code-bot",         # repo whose Actions runs are shown in the footer
     },
 }
 
@@ -96,6 +95,18 @@ class Config:
         if name.startswith("_") or name not in DEFAULTS:
             raise AttributeError(name)
         return self._data.get(name)
+
+    def set(self, section: str, key: str, value: Any) -> None:
+        """Set ``section.key`` in memory. Call ``save()`` to persist.
+
+        Creates the section if missing; replaces it if the on-disk value
+        was not a mapping (corrupt file shouldn't block a legit write).
+        """
+        s = self._data.get(section)
+        if not isinstance(s, dict):
+            s = {}
+            self._data[section] = s
+        s[key] = value
 
     def save(self) -> None:
         """Rewrite the on-disk file from the in-memory state. Used by

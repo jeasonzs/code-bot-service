@@ -90,13 +90,17 @@ pip uninstall codebot                # 单独卸载 Python 包
 - **macOS**：TCC 提示 + 写 `~/Library/LaunchAgents/com.codebot.codebotd.plist` + `launchctl load -w`
 - **Windows**：装 WinUSB INF（管理员） + 注册 Task Scheduler 任务（onlogon）
 
+倒数第二步（phase 4）会问你要不要配 GitHub token（LCD 的 GitHub 页要用）。
+**直接回车就跳过**，随时可以之后补。最后一步（phase 5）才装自启 + 拉起
+daemon——这样 token / Claude 集成配置都已经落盘,daemon 起来时直接读到。
+细节见下面"GitHub token（可选）"。
+
 整个进程跑在 `sudo` 下时，user-scope 写入（systemd unit / plist / Claude
-集成）仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），不会写到
-`/root`。所以 Linux 推荐 `sudo "$(which codebotd)" setup`（绝对路径，
-跨所有装法通用），而不是只把 `--user` 装 pip 包那一步 sudo 一下。
-**裸 `sudo codebotd setup` 只在 `sudo pip install` 装法下 work**——
-其他装法 sudo 的 secure_path 默认不含 `~/.local/bin/`，找不到 codebotd。
-见上面"Sudo 用法"段。
+集成）会落到 **`/root`** 而不是你的 home，daemon（用户态运行）读不到
+这些文件，setup 看起来成功了但其实没生效。所以 **`codebotd setup`
+不要 `sudo` 跑**。udev 那一步如果需要 root，由 `os_helper.run_as_root`
+内部只对那一条 shell 命令加 sudo，Python 进程保持在你的 env 不动。
+见下面"Sudo 用法"段。
 
 幂等。再跑一次不会出错。
 
@@ -111,28 +115,32 @@ pip uninstall codebot                # 单独卸载 Python 包
 | `codebotd status` | 查看 daemon 状态（PID / ports / USB device） |
 | `codebotd doctor` | 环境诊断（Python / 依赖 / libusb / 设备枚举） |
 | `codebotd setup` | 一条命令搞定平台驱动 + 自启 + Claude 集成 |
-| `codebotd teardown` | `setup` 的反向：清掉所有平台相关的东西（驱动 / 自启 / Claude 集成） |
+| `codebotd teardown` | `setup` 的反向：按 反向顺序 停 daemon → 清 Claude 集成 → 拆驱动。**不动** `~/.code_bot/config.yml`(GitHub token 保留) |
 | `codebotd test-protocol` | USB 协议编解码自检 |
 
 ## Sudo 用法
 
-`codebotd setup` / `teardown` 在 Linux 上需要写 `/etc/udev/rules.d/`——
-**setup / teardown 内部只对 udev 那一步 shell 命令（`install` / `rm` /
-`udevadm`）加 sudo**，python 进程保持在用户 env 不动。这样既不需要用户
-预先跑 `sudo`，又不会触发"`sudo` 切换到 root env → python 找不到 codebot"
-的兼容问题（尤其是 `pip install --user` 装法下，codebotd 的 shebang 是
-`#!/usr/bin/env python3`，sudo 下会解析到 system python）。
+`codebotd setup` 的 **udev 阶段**（写 `/etc/udev/rules.d/`）需要 root。
+**不要** `sudo codebotd setup`——`codebotd` 在 root env 下找不到
+`codebotd` 自己（root 的 `secure_path` 不含 `~/.local/bin/`），而且
+user-scope 写入（systemd --user / plist / Claude settings / config.yml）
+会落到 `/root/...`，daemon 读不到，等于没装。
 
-用户视角的交互：
+正确做法：**用户态跑 `codebotd setup`**，udev 那一步由 `os_helper.run_as_root`
+内部只对那一条 shell 命令加 sudo。Python 进程保持在你的 env（venv /
+`~/.local/`）不动，imports 不断。
 
 ```text
 $ codebotd setup
-[setup] phase 2/4: driver (linux)
+[setup] phase 2/5: driver (linux)
 [setup.driver] Installing udev rule to /etc/udev/rules.d/99-codebot.rules
 [sudo] password for you: ********
 [setup.driver] udev rules reloaded
-[setup] phase 3/4: service ...
-[setup] phase 4/4: Claude Code integration
+[setup] phase 3/5: Claude Code integration
+[setup] phase 4/5: GitHub token (optional)
+[setup] phase 5/5: service (linux)
+[setup.service] Installed /home/you/.config/systemd/user/codebot.service
+[setup.service] Daemon enabled and started for this user.
 ```
 
 | 操作 | sudo? |
@@ -143,18 +151,16 @@ $ codebotd setup
 | `codebotd setup` / `teardown` | **内部 sudo（仅 udev 那一步 shell 命令）**；Windows 用管理员 PowerShell；macOS 不需要 |
 | `apt install python3-pip` / `pipx` 等系统包 | **是**（一次性） |
 
-**手动跑 `sudo codebotd setup` 也仍然 work**：内部 `_run_as_root` helper
-检测到 `euid=0`，跳过 sudo 前缀，直接跑 `install` / `udevadm`。等于
-"已经 sudo 过了，不要再 sudo 一次"。
+**已经 root 的容器 / 远程 chroot**：`codebotd setup` 直接跑就行
+（`os_helper.run_as_root` 检测到 `euid=0` 就跳过 `sudo` 前缀）。
 
-**非交互环境**（容器 / CI / cron）：setup 跑到 udev 那一步会卡 sudo 密码
-框——`codebotd setup --doctor-only` 可以只跑环境检查不写东西；或者先
+**非交互环境**（CI / cron）：setup 跑到 udev 那一步会卡 sudo 密码框——
+`codebotd setup --doctor-only` 可以只跑环境检查不写东西；或者先
 `sudo -v` 把凭证缓存住再跑 setup。
 
-**sudo 不可用**（容器没装 `sudo` 包）：`_run_as_root` 会抛
-`RuntimeError("sudo is required to install udev rules")`。绕开办法是手动
-跑 `sudo codebotd setup`（同样需要 sudo 在 root 的 PATH 里——这是一个鸡
-生蛋问题，最干净是 `apt install sudo`）。
+**sudo 不可用**（容器没装 `sudo` 包）：`run_as_root` 会抛
+`RuntimeError("sudo is required to install udev rules")`。这条在
+最小化容器里常见，最干净是 `apt install sudo`。
 
 ## Claude Code 集成（可选）
 
@@ -180,6 +186,33 @@ Claude Code 会话
 
 Claude 集成是幂等的：再跑会备份 `~/.claude/settings.json.<TS>.bak` 然后覆盖 statusLine + hooks 块，保留 `mcpServers` / `permissions` 等其他 key。
 
+## GitHub token（可选）
+
+LCD 的 GitHub 页要一个 personal access token（PAT）才有数据。
+`codebotd setup` 的最后一步会问：
+
+```text
+[setup] phase 4/5: GitHub token (optional)
+  Code Bot's GitHub page needs a personal access token
+  (scopes: repo, read:user — read-only stats, nothing is written).
+  Create one at: https://github.com/settings/tokens/new?scopes=repo,read:user...
+  Press Enter on an empty prompt to skip; you can add it later.
+
+  GitHub token (hidden, Enter to skip):
+```
+
+- 输入是隐藏的（`getpass`），token 不会留在终端 scrollback 里。
+- 存进 `~/.code_bot/config.yml` 的 `github.token`，权限 600。
+- 存之前会拿 `GET /user` 验一下，通过会打印认证到的用户名；验不过（401 /
+  离线）可以选择"仍然保存"，或重试，或跳过。
+- **随时可以跳过**：直接回车。之后补的两种办法：编辑
+  `~/.code_bot/config.yml`，或 `export GITHUB_TOKEN=<pat>` 再起 daemon。
+- 已经配过 token 时，默认保留不动（`--interactive` 下才问要不要换）。
+- `$GITHUB_TOKEN` 已经在环境里时整个 phase 跳过——运行时 env 优先于配置文件。
+- 非 TTY（CI / 管道 / `--doctor-only`）不会卡住：打印补配方式然后跳过。
+
+不配 token 也完全 OK —— 其他页面正常，只有 GitHub 页显示一个 warning banner。
+
 ## 架构
 
 - **transport**: pyusb + libusb（Linux 系统包 / macOS IOKit / Windows vendor dll fallback）
@@ -195,10 +228,10 @@ Claude 集成是幂等的：再跑会备份 `~/.claude/settings.json.<TS>.bak` �
 - `USB device scan INFO not found` → 检查 udev（Linux）/ WinUSB 绑定（Windows）/ TCC 权限（macOS）
 - Python 版本太旧 → 按上面"三平台 Python 安装"升级
 - `setup` 卡在 `sudo` 密码框 → 输入密码，或先 `sudo -v` 把凭证缓存住再跑
-- 容器 / 最小镜像无 `sudo` → `apt install sudo`，或直接手动 `sudo codebotd setup`
-  （仍走内部 `_run_as_root`，euid==0 时 helper 不再前缀 sudo）
+- 容器 / 最小镜像无 `sudo` → `apt install sudo`（udev 那一步靠它）；
+  或者直接以 root 进入容器跑 setup，user-scope 文件会落到 `/root/...`
 - `sudo is required to install udev rules` → 当前环境没装 `sudo` 二进制，
-  且 euid 不是 0；只能手动 `sudo codebotd setup` 或装 sudo
+  且 euid 不是 0；装 sudo，或以 root 身份跑 setup
 
 ## 详细文档
 

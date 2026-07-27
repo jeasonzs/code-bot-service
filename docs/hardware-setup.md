@@ -55,23 +55,28 @@ sudo apk add libusb
 ### 安装 udev 规则
 
 ```bash
-sudo "$(which codebotd)" setup       # 绝对路径写法，跨所有装法通用
+codebotd setup
 ```
 
 这会：
-1. 把 `udev/99-codebot.rules` 复制到 `/etc/udev/rules.d/`
+1. 把 `udev/99-codebot.rules` 复制到 `/etc/udev/rules.d/`（udev 阶段
+   内部走 `os_helper.run_as_root`，会提示一次 sudo 密码）
 2. `udevadm control --reload-rules && udevadm trigger`
 3. 注册 systemd 用户级 unit `~/.config/systemd/user/codebot.service`，
    `ExecStart=` 自动填入 `which codebotd` 解析到的绝对路径
 4. 提示 `sudo usermod -aG plugdev $USER`（可选，登录后生效）
 
-> **整个进程跑在 sudo 下**——phase 3 / 4 的 systemd unit、Claude 集成等
-> user-scope 写入仍然落到**调用者用户**名下（`$SUDO_USER` 解算的 `$HOME`），
-> 不会写到 `/root` 下。这是 `codebotd setup` 默认推荐 sudo 跑的原因。
+> **`codebotd setup` 不要 sudo 跑**。`codebotd` 在 root env 下找不到
+> 自己（root 的 `secure_path` 不含 `~/.local/bin/`），而且 phase 5 的
+> systemd unit、phase 3 的 Claude settings、phase 4 的
+> `~/.code_bot/config.yml` 等 user-scope 写入会落到 `/root/...`，
+> daemon 读不到，等于没装。`run_as_root` helper 已经把 udev 那一条
+> shell 命令单独 sudo，Python 进程保持用户 env。
 
-`codebotd setup`（无 sudo）下 udev 阶段会**直接报错退出**——没有
-fallback 到 `~/.config/udev/rules.d/`。那路径在 systemd 系发行版基本
-不加载，写了也是装了个寂寞。`sudo "$(which codebotd)" setup` 是唯一可靠路径。
+`codebotd setup`（无 sudo）下 udev 阶段如果走不到 `/etc/udev/rules.d/`
+会**直接报错退出**——没有 fallback 到 `~/.config/udev/rules.d/`。那路径
+在 systemd 系发行版基本不加载，写了也是装了个寂寞。需要 root 时让 setup
+自己提示密码。
 
 ### 验证
 
@@ -206,14 +211,16 @@ codebotd doctor
 
 ## 卸载
 
-`codebotd teardown` 把 `setup` 装下的所有东西清掉：
+`codebotd teardown` 把 `setup` 装下的所有东西清掉，**按反向顺序**：
 
-- udev 规则（系统级 `/etc/udev/rules.d/` 和用户级 `~/.config/udev/rules.d/` 两处）
-- WinUSB INF 绑定（Windows，需管理员）
-- systemd user unit + daemon-reload
-- launchd LaunchAgent + unload
-- Task Scheduler 任务
-- `~/.claude/settings.json` 里的 `statusLine` + `hooks` 块（备份后删除）
+1. systemd user unit / launchd LaunchAgent / Task Scheduler 任务
+   (停 daemon,避免 collector 与后续清理 race)
+2. `~/.claude/settings.json` 里的 `statusLine` + `hooks` 块(备份后删除)
+3. udev 规则(系统级 `/etc/udev/rules.d/` 和用户级 `~/.config/udev/rules.d/` 两处)
+   / WinUSB INF 绑定(Windows,需管理员)
+
+**保留**:`~/.code_bot/config.yml`(GitHub token 不删),`~/.local/share/codebot/`
+状态文件,`~/.code-bot/` 运行时目录——重跑 `codebotd setup` 时这些不需要重建。
 
 ```bash
 codebotd teardown                    # 默认非交互

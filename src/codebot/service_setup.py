@@ -1,6 +1,6 @@
 """Per-platform daemon auto-start installer for Code Bot.
 
-Invoked by ``codebotd setup`` (phase 3/4). Three branches:
+Invoked by ``codebotd setup`` (phase 3/5). Three branches:
 
   Linux    — render systemd user unit from ``systemd/codebot.service.in``,
               substitute ``@CODEBOTD_PATH@`` with the resolved ``codebotd``
@@ -42,9 +42,6 @@ except ImportError:  # pragma: no cover — only hit on Python < 3.9
     from importlib_resources import files  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Callable
-
-from ._paths import real_user_home, resolve_codebotd
-
 
 log = logging.getLogger("codebot.service_setup")
 
@@ -89,15 +86,12 @@ def _launchd_plist_template_src() -> Path:
     )
 
 
-# Per-platform target paths.
-# Functions (NOT module constants) because Path.home() evaluated at import
-# time would freeze the path to /root when this module is imported under
-# `sudo codebotd setup` — then the unit would land in /root/.config/systemd
-# and never be enabled for the actual user.
+# Per-platform target paths. Functions (not module constants) so tests
+# can monkey-patch ``Path.home()`` without re-importing.
 
 
 def _linux_unit_dir() -> Path:
-    return real_user_home() / ".config" / "systemd" / "user"
+    return Path.home() / ".config" / "systemd" / "user"
 
 
 def _linux_unit_file() -> Path:
@@ -105,7 +99,7 @@ def _linux_unit_file() -> Path:
 
 
 def _mac_agents_dir() -> Path:
-    return real_user_home() / "Library" / "LaunchAgents"
+    return Path.home() / "Library" / "LaunchAgents"
 
 
 def _mac_agents_file() -> Path:
@@ -124,7 +118,7 @@ def _setup_service_linux(assume_yes: bool) -> int:
               file=sys.stderr)
         return 1
 
-    codebotd_path = resolve_codebotd()
+    codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Run `pip install --force-reinstall codebot` (or `pip install -e .` "
@@ -187,7 +181,7 @@ def _setup_service_macos(assume_yes: bool) -> int:
               file=sys.stderr)
         return 1
 
-    codebotd_path = resolve_codebotd()
+    codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Run `pip3 install --user codebot` (or `pip3 install codebot`).",
@@ -253,7 +247,7 @@ def _mac_uid() -> str:
 # Windows: Task Scheduler per-user task
 # ==============================================================
 def _setup_service_windows(assume_yes: bool) -> int:
-    codebotd_path = resolve_codebotd()
+    codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
         print("[setup.service] ERROR: `codebotd` not on PATH. "
               "Reinstall: `pip install --force-reinstall codebot`.",
