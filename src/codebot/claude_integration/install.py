@@ -36,7 +36,87 @@ log = logging.getLogger("codebot.claude_install")
 # Claude Code writes settings.json to ~/.claude/settings.json on every
 # platform; ~/.claude always resolves to <HOME>/.claude (cross-platform).
 _SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-_BACKUPS_DIR = Path.home() / ".claude" / "backups"
+
+
+def _backups_dir_for(settings: Path) -> Path:
+    """Backup dir that travels with the settings file.
+
+    For the default ``~/.claude/settings.json`` this is
+    ``~/.claude/backups`` — the historical location. When the user points
+    the wizard at a settings.json somewhere else, backups land next to
+    that file instead of in a directory that has nothing to do with it.
+    """
+    return settings.parent / "backups"
+
+
+def _detect_claude() -> "tuple[bool, str]":
+    """``(found, how)`` — is Claude Code installed for this user?
+
+    Two independent signals, either is enough: the settings file already
+    exists, or the ``claude`` CLI is on PATH (a fresh install that hasn't
+    written settings.json yet). We report which one matched so the wizard
+    can show it.
+    """
+    if _SETTINGS_PATH.exists():
+        return True, str(_SETTINGS_PATH)
+    if shutil.which("claude") is not None:
+        return True, "`claude` on PATH (settings.json not created yet)"
+    return False, f"no {_SETTINGS_PATH}, no `claude` on PATH"
+
+
+# Wizard choices for the Claude phase. Defined as constants because the
+# select() default has to be one of them verbatim.
+_CHOICE_CONFIGURE = "Configure the Claude hooks + statusline"
+_CHOICE_CUSTOM_PATH = "Point me at a settings.json instead…"
+_CHOICE_SKIP = "Skip for now"
+
+
+def _resolve_settings_path() -> "Path | None":
+    """Ask the user where settings.json lives. ``None`` means skip.
+
+    This is the interactive half of the Claude phase. Non-interactively
+    every prompt returns its default, which means: configure at the
+    standard path when Claude is detected, skip when it isn't.
+    """
+    from .. import _ui
+
+    found, how = _detect_claude()
+
+    if found:
+        _ui.check("Claude Code", "PASS", f"detected — {how}")
+        choice = _ui.select(
+            "Configure Code Bot's statusline and hooks?",
+            [_CHOICE_CONFIGURE, _CHOICE_SKIP],
+            default=_CHOICE_CONFIGURE,
+        )
+        if choice == _CHOICE_SKIP:
+            return None
+        return _SETTINGS_PATH
+
+    _ui.check("Claude Code", "INFO", f"not detected — {how}")
+    choice = _ui.select(
+        "Claude Code wasn't found. What now?",
+        [_CHOICE_SKIP, _CHOICE_CUSTOM_PATH],
+        # Default is skip: with no Claude Code present, writing a
+        # settings.json into a guessed location helps nobody.
+        default=_CHOICE_SKIP,
+    )
+    if choice != _CHOICE_CUSTOM_PATH:
+        return None
+
+    answer = _ui.path(
+        "Path to settings.json:",
+        default=str(_SETTINGS_PATH),
+    )
+    if not answer:
+        return None
+    target = Path(answer).expanduser()
+    if target.is_dir():
+        # Tab-completion makes stopping at the directory easy to do by
+        # accident; finish the job rather than failing.
+        target = target / "settings.json"
+    return target
+
 
 # Claude Code v2 hooks — see https://docs.claude.com/en/docs/claude-code/hooks
 # We bind all 8 standard lifecycle events.
@@ -67,13 +147,14 @@ def _console_script_names() -> tuple[str, str]:
 def _backup_existing(settings: Path) -> Path | None:
     if not settings.exists():
         return None
-    _BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    backups = _backups_dir_for(settings)
+    backups.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(_BACKUPS_DIR, 0o700)
+        os.chmod(backups, 0o700)
     except (OSError, NotImplementedError):
         pass
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dst = _BACKUPS_DIR / f"settings.json.{ts}.bak"
+    dst = backups / f"{settings.name}.{ts}.bak"
     shutil.copy2(settings, dst)
     return dst
 
@@ -114,12 +195,23 @@ def _merge_settings(existing: dict, *, statusline_cmd: str, hook_cmd: str,
     return out
 
 
-def run_install(*, assume_yes: bool = False) -> int:
-    """Merge statusline + hooks into ~/.claude/settings.json.
+def run_install(*, settings_path: Path | None = None) -> int:
+    """Merge statusline + hooks into Claude Code's settings.json.
 
-    Returns 0 on success, 1 on user abort / no Claude Code detected, 2 on
-    fatal error.
+    ``settings_path`` overrides the target file. When it is ``None`` the
+    wizard detects Claude Code and asks the user what to do (configure /
+    supply a path / skip) — see ``_resolve_settings_path``.
+
+    Returns 0 on success, 1 on user skip, 2 on fatal error.
     """
+    from .. import _ui
+
+    if settings_path is None:
+        settings_path = _resolve_settings_path()
+        if settings_path is None:
+            _ui.check("Claude Code", "INFO", "skipped — re-run `codebotd setup` later")
+            return 1
+
     statusline_cmd, hook_cmd = _console_script_names()
     state_file = os.environ.get(
         "CODEBOT_STATE_FILE",
@@ -143,27 +235,22 @@ def run_install(*, assume_yes: bool = False) -> int:
         return 2
 
     # Backup.
-    backup_path = _backup_existing(_SETTINGS_PATH)
+    backup_path = _backup_existing(settings_path)
     if backup_path is not None:
-        print(f"Backed up {_SETTINGS_PATH} -> {backup_path}")
+        _ui.check("backup", "PASS", f"{settings_path} -> {backup_path}")
     else:
-        print(f"No existing {_SETTINGS_PATH} (will create)")
+        _ui.check("backup", "INFO", f"no existing {settings_path} (will create)")
 
     # Read existing (if any) — tolerate malformed JSON by treating as empty.
     existing: dict = {}
-    if _SETTINGS_PATH.exists():
+    if settings_path.exists():
         try:
-            existing = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
             if not isinstance(existing, dict):
-                print(
-                    f"[WARN] {_SETTINGS_PATH} is not a JSON object; "
-                    f"merging into {{}}",
-                    file=sys.stderr,
-                )
+                _ui.warn(f"{settings_path} is not a JSON object; merging into {{}}")
                 existing = {}
         except json.JSONDecodeError as e:
-            print(f"[WARN] {_SETTINGS_PATH} JSON invalid ({e}); merging into {{}}",
-                  file=sys.stderr)
+            _ui.warn(f"{settings_path} JSON invalid ({e}); merging into {{}}")
             existing = {}
 
     # Merge.
@@ -176,12 +263,12 @@ def run_install(*, assume_yes: bool = False) -> int:
     )
 
     # Atomic write.
-    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(_SETTINGS_PATH.parent, 0o700)
+        os.chmod(settings_path.parent, 0o700)
     except (OSError, NotImplementedError):
         pass
-    tmp = _SETTINGS_PATH.with_name(_SETTINGS_PATH.name + ".tmp")
+    tmp = settings_path.with_name(settings_path.name + ".tmp")
     tmp.write_text(
         json.dumps(merged, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -190,7 +277,7 @@ def run_install(*, assume_yes: bool = False) -> int:
         os.chmod(tmp, 0o600)
     except (OSError, NotImplementedError):
         pass
-    os.replace(tmp, _SETTINGS_PATH)
+    os.replace(tmp, settings_path)
 
     # Ensure ~/.code-bot/ parents exist for the runtime files.
     Path(state_file).parent.mkdir(parents=True, exist_ok=True)
@@ -204,56 +291,59 @@ def run_install(*, assume_yes: bool = False) -> int:
     except (OSError, NotImplementedError):
         pass
 
-    print()
-    print(f"Statusline command: {statusline_cmd}")
-    print(f"  -> state file:    {state_file}")
-    print(f"Hook command:       {hook_cmd}  ({len(_HOOK_EVENTS)} events)")
-    print(f"  -> status file:   {status_file}")
-    print()
-    print(f"Done. Wrote {_SETTINGS_PATH}")
-    print("Restart Claude Code (or open a new session) for changes to take effect.")
+    _ui.check("statusline", "PASS", f"{statusline_cmd} -> {state_file}")
+    _ui.check("hooks", "PASS", f"{hook_cmd} ({len(_HOOK_EVENTS)} events) -> {status_file}")
+    _ui.check("settings", "PASS", f"wrote {settings_path}")
+    _ui.info("Restart Claude Code (or open a new session) for changes to take effect.")
     return 0
 
 
-def run_uninstall(*, assume_yes: bool = True) -> int:
+def run_uninstall(*, settings_path: Path | None = None) -> int:
     """Reverse of ``run_install``: remove the ``statusLine`` and ``hooks``
-    blocks that ``codebotd setup`` wrote into ``~/.claude/settings.json``.
+    blocks that ``codebotd setup`` wrote into the target settings.json.
 
     Other keys (mcpServers / permissions / etc.) are preserved. The current
-    settings file is backed up to ``~/.claude/backups/settings.json.<TS>.bak``
-    before modification — the same convention as ``run_install``.
+    settings file is backed up to ``<settings.json's dir>/backups/`` before
+    modification — the same convention as ``run_install``.
 
     Idempotent: re-running after a previous teardown is a no-op (rc=0).
     """
-    if not _SETTINGS_PATH.exists():
-        print(f"[teardown.claude] No {_SETTINGS_PATH}; nothing to remove.")
+    from .. import _ui
+
+    target = settings_path or _SETTINGS_PATH
+    if not target.exists():
+        _ui.check("Claude Code", "INFO", f"no {target}; nothing to remove")
         return 0
 
     try:
-        existing = json.loads(_SETTINGS_PATH.read_text(encoding="utf-8"))
+        existing = json.loads(target.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        print(f"[teardown.claude] ERROR: {_SETTINGS_PATH} is invalid JSON ({e}); "
-              "refusing to modify.", file=sys.stderr)
+        _ui.error(f"{target} is invalid JSON ({e}); refusing to modify")
         return 2
     if not isinstance(existing, dict):
-        print(f"[teardown.claude] ERROR: {_SETTINGS_PATH} is not a JSON object; "
-              "refusing to modify.", file=sys.stderr)
+        _ui.error(f"{target} is not a JSON object; refusing to modify")
         return 2
 
     if "statusLine" not in existing and "hooks" not in existing:
-        print(f"[teardown.claude] No codebot entries in {_SETTINGS_PATH}; "
-              "nothing to remove.")
+        _ui.check("Claude Code", "INFO", f"no codebot entries in {target}")
         return 0
 
-    backup_path = _backup_existing(_SETTINGS_PATH)
+    if not _ui.confirm(
+        f"Remove statusLine + hooks blocks from {target}? (everything else preserved)",
+        default=True,
+    ):
+        _ui.check("Claude Code", "WARN", "kept")
+        return 0
+
+    backup_path = _backup_existing(target)
     if backup_path is not None:
-        print(f"[teardown.claude] Backed up {_SETTINGS_PATH} -> {backup_path}")
+        _ui.check("backup", "PASS", f"{target} -> {backup_path}")
 
     existing.pop("statusLine", None)
     existing.pop("hooks", None)
 
-    _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _SETTINGS_PATH.with_name(_SETTINGS_PATH.name + ".tmp")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(
         json.dumps(existing, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -262,10 +352,10 @@ def run_uninstall(*, assume_yes: bool = True) -> int:
         os.chmod(tmp, 0o600)
     except (OSError, NotImplementedError):
         pass
-    os.replace(tmp, _SETTINGS_PATH)
+    os.replace(tmp, target)
 
-    print(f"[teardown.claude] Removed statusLine + hooks from {_SETTINGS_PATH}")
-    print("Restart Claude Code (or open a new session) for changes to take effect.")
+    _ui.check("Claude Code", "PASS", f"removed statusLine + hooks from {target}")
+    _ui.info("Restart Claude Code (or open a new session) for changes to take effect.")
     return 0
 
 

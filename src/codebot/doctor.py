@@ -181,8 +181,18 @@ def _check_module(
         version = getattr(
             mod,
             version_attr,
-            "?",
+            None,
         )
+
+        if version is None:
+            # Some top-level packages (rich, questionary) don't expose
+            # __version__; ask the package metadata instead.
+            from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+            try:
+                version = _pkg_version(name)
+            except PackageNotFoundError:
+                version = "?"
 
         return Check(
             label,
@@ -330,10 +340,43 @@ CHECKS: list[Callable[[], Check]] = [
     lambda: _check_module("yaml"),
     lambda: _check_module("click"),
     lambda: _check_module("platformdirs"),
+    # questionary & rich don't expose __version__ on the top-level module,
+    # so _check_module falls back to importlib.metadata.
+    lambda: _check_module("questionary"),
+    lambda: _check_module("rich"),
 
     _check_usb_backend,
     _check_usb_device,
 ]
+
+
+def collect_checks() -> "tuple[list[Check], int]":
+    """Run every check and return ``(rows, fail_count)`` without printing.
+
+    The structured entry point, used by the ``codebotd setup`` wizard so it
+    can render the rows itself (colour / symbols on a TTY). ``run_doctor``
+    is the plain-text renderer on top of this.
+
+    A check that raises is reported as a FAIL row rather than propagating —
+    one broken probe shouldn't take down the whole diagnostic.
+    """
+    rows: list[Check] = []
+    fail_count = 0
+
+    for check_fn in CHECKS:
+        try:
+            row = check_fn()
+        except Exception as e:
+            row = Check(
+                "internal diagnostic error",
+                "FAIL",
+                f"{check_fn.__name__}: {e}",
+            )
+        rows.append(row)
+        if row.status == "FAIL":
+            fail_count += 1
+
+    return rows, fail_count
 
 
 def run_doctor(verbose: bool = True) -> int:
@@ -362,25 +405,11 @@ def run_doctor(verbose: bool = True) -> int:
 
         print("")
 
-    fail_count = 0
+    rows, fail_count = collect_checks()
 
-    for check_fn in CHECKS:
-        try:
-            check = check_fn()
-
-        except Exception as e:
-            # A diagnostic check itself should not crash the whole doctor.
-            check = Check(
-                "internal diagnostic error",
-                "FAIL",
-                f"{check_fn.__name__}: {e}",
-            )
-
-        if verbose:
-            print(check.render())
-
-        if check.status == "FAIL":
-            fail_count += 1
+    if verbose:
+        for row in rows:
+            print(row.render())
 
     if verbose:
         print("")

@@ -43,22 +43,29 @@ def doctor():
 
 
 @cli.command()
+@click.option("--yes", "-y", is_flag=True,
+              help="非交互：所有提示都取默认值，不问任何问题（CI / 脚本用）。")
 @click.option("--doctor-only", is_flag=True,
               help="只跑 doctor 检查环境，不安装任何东西（CI 友好）。")
-@click.option("--interactive", "-i", is_flag=True,
-              help="启用交互确认（默认全非交互：直接 sudo / 覆写 / 注册任务）。")
-def setup(doctor_only: bool, interactive: bool):
+def setup(yes: bool, doctor_only: bool):
     """一条命令完成平台感知安装：USB 驱动 + 守护进程自启 + Claude 集成。
 
-    自动识别当前平台（Linux / macOS / Windows）。默认非交互，
-    跑完即可：USB 设备被授权、daemon 在用户登录时自启、Claude Code
-    状态栏 + 8 个 lifecycle hook 注入 ~/.claude/settings.json。
-
-    各阶段：doctor → driver → service → claude。
+    自动识别当前平台（Linux / macOS / Windows）。在真正的 TTY 里默认
+    走交互向导（每步问你怎么处理）；传 ``--yes`` 关掉所有提示。
     幂等：再跑一次不会出错。
     """
+    from . import _ui
     from .setup import run_setup
-    sys.exit(run_setup(assume_yes=not interactive, doctor_only=doctor_only))
+
+    # Interactive iff the user didn't force --yes AND both sides of the
+    # terminal are real TTYs. The TTY check is what makes
+    # `codebotd setup | tee log` and `codebotd setup < /dev/null` behave
+    # like --yes even without the flag — the output stays plain text
+    # either way.
+    auto = not yes and sys.stdin.isatty() and sys.stdout.isatty()
+    _ui.bind(interactive=auto)
+
+    sys.exit(run_setup(doctor_only=doctor_only))
 
 
 @cli.command()
@@ -136,23 +143,29 @@ def send(text: str):
 
 
 @cli.command()
-@click.option("--interactive", "-i", is_flag=True,
-              help="启用交互确认（默认全非交互：直接删 / 覆写 / 注销任务）。")
-def teardown(interactive: bool):
+@click.option("--yes", "-y", is_flag=True,
+              help="非交互：所有提示都取默认值，不问任何问题（CI / 脚本用）。")
+def teardown(yes: bool):
     """codebotd setup 的反向操作：清掉所有 setup 装下的东西。
 
     卸载范围（全部默认执行）：
       * driver — udev 规则（系统 + 用户两级）/ WinUSB INF 绑定（需管理员）
       * service — systemd user unit / launchd LaunchAgent / Task Scheduler 任务
-      * Claude Code — ~/.claude/settings.json 里的 statusLine + hooks 块（备份后删除）
+      * Claude Code — settings.json 里的 statusLine + hooks 块（备份后删除）
 
     不动：codebot 包本身（pip uninstall codebot 单独跑）、daemon 状态文件、
     ~/.code-bot/。
 
-    幂等：再跑一次不会出错（已经清掉的就 no-op）。
+    幂等：再跑一次不会出错（已经清掉的就 no-op）。默认在 TTY 下走
+    交互向导；传 ``--yes`` 跳过确认。
     """
+    from . import _ui
     from .teardown import run_teardown
-    sys.exit(run_teardown(assume_yes=not interactive))
+
+    auto = not yes and sys.stdin.isatty() and sys.stdout.isatty()
+    _ui.bind(interactive=auto)
+
+    sys.exit(run_teardown())
 
 
 @cli.command()

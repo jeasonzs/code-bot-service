@@ -29,10 +29,8 @@ read and rewrite it.
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
-import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -47,22 +45,28 @@ _PAT_URL = "https://github.com/settings/tokens/new?scopes=repo,read:user&descrip
 _MAX_ATTEMPTS = 3
 
 
-def run_github_setup(assume_yes: bool = True) -> int:
+def run_github_setup() -> int:
     """Offer to store a GitHub PAT in ``~/.code_bot/config.yml``.
 
-    ``assume_yes`` is accepted for phase-signature symmetry but only
-    gates the *re*-prompt when a token is already configured; the
-    prompt itself is driven by whether stdin is a TTY, since this phase
-    collects input rather than confirming a destructive action.
+    Whether the user gets prompted is decided by
+    ``codebot._ui.is_interactive()`` — which is False when the wizard is
+    running in ``--yes`` mode or when stdin/stdout aren't TTYs. In that
+    case the only non-skip path is "a token is already in config.yml
+    and we're being asked to keep it", which the function performs
+    silently.
     """
+    from . import _ui
     from .config import Config
 
     cfg_path = Path.home() / ".code_bot" / "config.yml"
 
     env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
     if env_token:
-        print("  $GITHUB_TOKEN is set in the environment; it overrides config.yml.")
-        print("  Skipping token setup.")
+        _ui.check(
+            "GitHub token",
+            "INFO",
+            "$GITHUB_TOKEN set in environment — overrides config.yml",
+        )
         return 0
 
     cfg = Config(cfg_path)
@@ -70,41 +74,48 @@ def run_github_setup(assume_yes: bool = True) -> int:
     if current == _PLACEHOLDER:
         current = ""
 
-    if not sys.stdin.isatty():
-        print("  stdin is not a TTY — skipping the interactive token prompt.")
+    if not _ui.is_interactive():
         if current:
-            print(f"  A token is already configured in {cfg_path}.")
+            _ui.check("GitHub token", "INFO", f"already configured in {cfg_path}")
         else:
-            _print_manual_hint(cfg_path)
+            _ui.check("GitHub token", "INFO", "non-interactive mode — skipped")
+            _ui.hint([
+                "To configure it later:",
+                f"  • edit {cfg_path} and set github.token, or",
+                "  • export GITHUB_TOKEN=<pat> before starting the daemon.",
+            ])
         return 0
 
     if current:
-        print(f"  A GitHub token is already configured in {cfg_path}:")
-        print(f"    github.token = {_mask(current)}")
-        if assume_yes or not _ask_yes_no("  Replace it?", default=False):
-            print("  Keeping the existing token.")
+        _ui.check("GitHub token", "INFO", f"already configured: {_mask(current)}")
+        if not _ui.confirm("Replace it?", default=False):
+            _ui.check("GitHub token", "INFO", "kept")
             return 0
 
-    print("  Code Bot's GitHub page needs a personal access token")
-    print("  (scopes: repo, read:user — read-only stats, nothing is written).")
-    print(f"  Create one at: {_PAT_URL}")
-    print("  Press Enter on an empty prompt to skip; you can add it later.")
-    print()
+    _ui.hint([
+        "Code Bot's GitHub page needs a personal access token",
+        "(scopes: repo, read:user — read-only stats, nothing is written).",
+        f"Create one at: {_PAT_URL}",
+        "Press Enter on an empty prompt to skip; you can add it later.",
+    ])
 
     token = _prompt_token()
     if token is None:
-        print("  Skipped.")
-        _print_manual_hint(cfg_path)
+        _ui.check("GitHub token", "INFO", "skipped")
+        _ui.hint([
+            "To configure it later:",
+            f"  • edit {cfg_path} and set github.token, or",
+            "  • export GITHUB_TOKEN=<pat> before starting the daemon.",
+        ])
         return 0
 
     cfg.set("github", "token", token)
     cfg.save()
     if not _verify_written(cfg_path, token):
-        print(f"  ERROR: failed to write {cfg_path}; token not saved.", file=sys.stderr)
-        _print_manual_hint(cfg_path)
+        _ui.error(f"failed to write {cfg_path}; token not saved")
         return 1
 
-    print(f"  Saved to {cfg_path} (mode 600).")
+    _ui.check("GitHub token", "PASS", f"saved to {cfg_path} (mode 600)")
     return 0
 
 
@@ -113,46 +124,31 @@ def run_github_setup(assume_yes: bool = True) -> int:
 def _prompt_token() -> str | None:
     """Read + validate a PAT. ``None`` means the user chose to skip.
 
-    Input is hidden (``getpass``) so the token never lands in the
-    terminal scrollback. A token that fails validation costs a retry,
-    up to ``_MAX_ATTEMPTS``; the user can still keep it after a failed
-    check (offline install, or a scope we don't probe for).
+    Input is hidden so the token never lands in the terminal scrollback.
+    A token that fails validation costs a retry, up to ``_MAX_ATTEMPTS``;
+    the user can still keep it after a failed check (offline install, or
+    a scope we don't probe for).
     """
+    from . import _ui
+
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            token = getpass.getpass("  GitHub token (hidden, Enter to skip): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None
+        token = _ui.password("GitHub token (hidden, Enter to skip):", default="")
         if not token:
             return None
 
-        print("  Validating against api.github.com/user ...")
-        login, err = _validate(token)
+        with _ui.spinner("Validating against api.github.com/user …"):
+            login, err = _validate(token)
         if login:
-            print(f"  ✓ Token valid — authenticated as {login}.")
+            _ui.check("GitHub token", "PASS", f"authenticated as {login}")
             return token
 
-        print(f"  ✗ {err}")
-        if _ask_yes_no("  Save it anyway?", default=False):
+        _ui.warn(err)
+        if _ui.confirm("Save it anyway?", default=False):
             return token
         if attempt < _MAX_ATTEMPTS:
-            print("  Try again, or press Enter to skip.")
-    print("  Too many failed attempts.")
+            _ui.info("Try again, or press Enter to skip.")
+    _ui.warn("Too many failed attempts.")
     return None
-
-
-def _ask_yes_no(question: str, *, default: bool) -> bool:
-    """Prompt ``question``; EOF / Ctrl-C / empty input takes ``default``."""
-    suffix = " [Y/n] " if default else " [y/N] "
-    try:
-        answer = input(question + suffix).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return default
-    if not answer:
-        return default
-    return answer in ("y", "yes")
 
 
 # ---- validation ----
@@ -218,9 +214,3 @@ def _mask(token: str) -> str:
     if len(token) <= 8:
         return "*" * len(token)
     return f"{token[:4]}...{token[-4:]}"
-
-
-def _print_manual_hint(cfg_path: Path) -> None:
-    print("  To configure it later, either:")
-    print(f"    • edit {cfg_path} and set github.token, or")
-    print("    • export GITHUB_TOKEN=<pat> before starting the daemon.")

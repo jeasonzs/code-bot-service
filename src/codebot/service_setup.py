@@ -18,8 +18,9 @@ Invoked by ``codebotd setup`` (phase 3/5). Three branches:
               needed: matches the daemon's per-user USB scope, equivalent
               to ``systemd --user`` / ``~/Library/LaunchAgents``.
 
-``assume_yes`` defaults to True (non-interactive) — ``codebotd setup``
-flips it to False only when the user passes ``--interactive``.
+``assume_yes`` is no longer a parameter; whether the handler prompts
+is decided by ``codebot._ui.is_interactive()``. ``codebotd setup`` is
+interactive by default; pass ``--yes`` to suppress every prompt.
 
 Return codes:
   0 = success
@@ -42,6 +43,8 @@ except ImportError:  # pragma: no cover — only hit on Python < 3.9
     from importlib_resources import files  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Callable
+
+from . import _ui
 
 log = logging.getLogger("codebot.service_setup")
 
@@ -112,24 +115,26 @@ WIN_TASK_NAME = "CodeBot"
 # ==============================================================
 # Linux: systemd user unit
 # ==============================================================
-def _setup_service_linux(assume_yes: bool) -> int:
+def _setup_service_linux() -> int:
     if shutil.which("systemctl") is None:
-        print("[setup.service] ERROR: systemctl not found (install systemd)",
-              file=sys.stderr)
+        _ui.error("systemctl not found (install systemd)")
         return 1
 
     codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
-        print("[setup.service] ERROR: `codebotd` not on PATH. "
-              "Run `pip install --force-reinstall codebot` (or `pip install -e .` "
-              "from a checkout) and ensure its bin/ dir is on PATH.",
-              file=sys.stderr)
+        _ui.error("`codebotd` not on PATH — reinstall the package")
         return 2
+
+    if not _ui.confirm(
+        f"Register the codebotd systemd user unit at {_linux_unit_file()}?",
+        default=True,
+    ):
+        _ui.check("service", "WARN", "skipped — start it by hand later")
+        return 0
 
     template = _systemd_unit_template_src()
     if not template.exists():
-        print(f"[setup.service] ERROR: systemd unit template not found at {template}",
-              file=sys.stderr)
+        _ui.error(f"systemd unit template not found at {template}")
         return 2
 
     rendered = template.read_text(encoding="utf-8").replace(
@@ -140,58 +145,63 @@ def _setup_service_linux(assume_yes: bool) -> int:
     unit_file = _linux_unit_file()
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit_file.write_text(rendered, encoding="utf-8")
-    print(f"[setup.service] Installed {unit_file}")
-    print(f"[setup.service]   ExecStart={codebotd_path} start")
+    _ui.check("service", "PASS", f"installed {unit_file} (ExecStart={codebotd_path} start)")
 
+    # Prompting is done; safe to spawn systemctl.
     try:
-        subprocess.run(
-            ["systemctl", "--user", "daemon-reload"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["systemctl", "--user", "enable", "--now", "codebot.service"],
-            check=True, capture_output=True,
-        )
+        with _ui.spinner("systemctl daemon-reload + enable --now …"):
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["systemctl", "--user", "enable", "--now", "codebot.service"],
+                check=True, capture_output=True,
+            )
     except subprocess.CalledProcessError as e:
-        print(f"[setup.service] ERROR: systemctl failed ({e})", file=sys.stderr)
+        _ui.error(f"systemctl failed ({e})")
         return 1
     except FileNotFoundError:
         # Belt-and-suspenders: shutil.which("systemctl") returned truthy above
-        print("[setup.service] ERROR: systemctl vanished between checks", file=sys.stderr)
+        _ui.error("systemctl vanished between checks")
         return 1
 
-    print("[setup.service] Daemon enabled and started for this user.")
-    print()
-    print("  Hint: for headless boxes (no graphical login), enable lingering so")
-    print("  the user unit runs even when you're not logged in:")
-    print()
-    print(f"    sudo loginctl enable-linger $USER")
-    print()
-    print("  Verify: `systemctl --user status codebot.service`")
+    _ui.check("service", "PASS", "daemon enabled and started for this user")
+    _ui.hint([
+        "Hint: for headless boxes (no graphical login), enable lingering so",
+        "the user unit runs even when you're not logged in:",
+        "",
+        "    sudo loginctl enable-linger $USER",
+        "",
+        "Verify: `systemctl --user status codebot.service`",
+    ])
     return 0
 
 
 # ==============================================================
 # macOS: launchd LaunchAgent
 # ==============================================================
-def _setup_service_macos(assume_yes: bool) -> int:
+def _setup_service_macos() -> int:
     if shutil.which("launchctl") is None:
         # Should never happen on macOS but be defensive.
-        print("[setup.service] ERROR: launchctl not found (macOS only)",
-              file=sys.stderr)
+        _ui.error("launchctl not found (macOS only)")
         return 1
 
     codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
-        print("[setup.service] ERROR: `codebotd` not on PATH. "
-              "Run `pip3 install --user codebot` (or `pip3 install codebot`).",
-              file=sys.stderr)
+        _ui.error("`codebotd` not on PATH — reinstall the package")
         return 2
+
+    if not _ui.confirm(
+        f"Register the codebotd LaunchAgent at {_mac_agents_file()}?",
+        default=True,
+    ):
+        _ui.check("service", "WARN", "skipped — load it by hand later")
+        return 0
 
     template = _launchd_plist_template_src()
     if not template.exists():
-        print(f"[setup.service] ERROR: launchd plist template not found at {template}",
-              file=sys.stderr)
+        _ui.error(f"launchd plist template not found at {template}")
         return 2
 
     rendered = template.read_text(encoding="utf-8").replace(
@@ -202,34 +212,35 @@ def _setup_service_macos(assume_yes: bool) -> int:
     agents_file = _mac_agents_file()
     agents_dir.mkdir(parents=True, exist_ok=True)
     agents_file.write_text(rendered, encoding="utf-8")
-    print(f"[setup.service] Installed {agents_file}")
-    print(f"[setup.service]   ProgramArguments[0]={codebotd_path}")
+    _ui.check("service", "PASS", f"installed {agents_file} (ProgramArguments[0]={codebotd_path})")
 
     # If the plist was loaded previously (different codebotd path), unload it
-    # first so launchctl re-reads the new ProgramArguments.
+    # first so launchctl re-reads the new ProgramArguments. (No prompts in
+    # the way, so safe to call launchctl now.)
     label = "com.codebot.codebotd"
     probe = subprocess.run(
         ["launchctl", "print", f"gui/{_mac_uid()}/{label}"],
         capture_output=True, text=True, check=False,
     )
     if probe.returncode == 0:
-        print(f"[setup.service] Unloading previous {label} (re-render)...")
+        _ui.info(f"unloading previous {label} (re-render)")
         subprocess.run(
             ["launchctl", "unload", "-w", str(agents_file)],
             capture_output=True, check=False,
         )
 
     try:
-        subprocess.run(
-            ["launchctl", "load", "-w", str(agents_file)],
-            check=True, capture_output=True,
-        )
+        with _ui.spinner("launchctl load -w …"):
+            subprocess.run(
+                ["launchctl", "load", "-w", str(agents_file)],
+                check=True, capture_output=True,
+            )
     except subprocess.CalledProcessError as e:
-        print(f"[setup.service] ERROR: launchctl load failed ({e})", file=sys.stderr)
+        _ui.error(f"launchctl load failed ({e})")
         return 1
 
-    print("[setup.service] LaunchAgent loaded; daemon will start at next Aqua login.")
-    print("  Verify: `launchctl list | grep codebot`")
+    _ui.check("service", "PASS", "LaunchAgent loaded — daemon starts at next Aqua login")
+    _ui.info("Verify: `launchctl list | grep codebot`")
     return 0
 
 
@@ -246,44 +257,47 @@ def _mac_uid() -> str:
 # ==============================================================
 # Windows: Task Scheduler per-user task
 # ==============================================================
-def _setup_service_windows(assume_yes: bool) -> int:
+def _setup_service_windows() -> int:
     codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
-        print("[setup.service] ERROR: `codebotd` not on PATH. "
-              "Reinstall: `pip install --force-reinstall codebot`.",
-              file=sys.stderr)
+        _ui.error("`codebotd` not on PATH — reinstall the package")
         return 2
+
+    if not _ui.confirm(
+        f"Register the codebotd Task Scheduler task '{WIN_TASK_NAME}' (onlogon, highest privileges)?",
+        default=True,
+    ):
+        _ui.check("service", "WARN", "skipped — register it by hand later")
+        return 0
 
     # schtasks /tr parses the command line; wrap path in quotes so it survives
     # spaces (e.g. C:\Program Files\Python311\Scripts\codebotd.exe).
     tr = f'"{codebotd_path}" start'
 
     try:
-        result = subprocess.run(
-            [
-                "schtasks", "/create",
-                "/tn", WIN_TASK_NAME,
-                "/tr", tr,
-                "/sc", "onlogon",
-                "/rl", "HIGHEST",
-                "/f",
-            ],
-            capture_output=True, text=True, check=True,
-        )
+        with _ui.spinner("schtasks /create …"):
+            subprocess.run(
+                [
+                    "schtasks", "/create",
+                    "/tn", WIN_TASK_NAME,
+                    "/tr", tr,
+                    "/sc", "onlogon",
+                    "/rl", "HIGHEST",
+                    "/f",
+                ],
+                capture_output=True, text=True, check=True,
+            )
     except FileNotFoundError:
-        print("[setup.service] ERROR: schtasks not found in PATH", file=sys.stderr)
+        _ui.error("schtasks not found in PATH")
         return 1
     except subprocess.CalledProcessError as e:
-        print(f"[setup.service] ERROR: schtasks failed (rc={e.returncode})",
-              file=sys.stderr)
+        _ui.error(f"schtasks failed (rc={e.returncode})")
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         return 1
 
-    print(f"[setup.service] Registered Task Scheduler task '{WIN_TASK_NAME}' "
-          f"(onlogon, highest privileges).")
-    print(f"[setup.service]   /tr={tr}")
-    print()
+    _ui.check("service", "PASS", f"registered task '{WIN_TASK_NAME}' (onlogon)")
+    _ui.info(f"  /tr={tr}")
 
     # Best-effort query so the user gets an immediate confirmation.
     probe = subprocess.run(
@@ -293,91 +307,106 @@ def _setup_service_windows(assume_yes: bool) -> int:
     if probe.returncode == 0:
         # Just the first non-empty line of the query output (status header).
         first = next((ln.strip() for ln in probe.stdout.splitlines() if ln.strip()), "")
-        print(f"[setup.service]   status: {first}")
+        _ui.info(f"  status: {first}")
     else:
-        print("[setup.service]   (query failed; verify with `schtasks /query /tn CodeBot`)")
-    print()
-    print("  Hint: trigger the task now without waiting for next logon:")
-    print()
-    print(f"    schtasks /run /tn {WIN_TASK_NAME}")
+        _ui.info("  (query failed; verify with `schtasks /query /tn CodeBot`)")
+
+    _ui.hint([
+        "Trigger the task now without waiting for next logon:",
+        "",
+        f"    schtasks /run /tn {WIN_TASK_NAME}",
+    ])
     return 0
 
 
 # ==============================================================
 # Teardown (reverse of install)
 # ==============================================================
-def _teardown_service_linux(assume_yes: bool) -> int:
+def _teardown_service_linux() -> int:
     """Disable + remove the systemd user unit."""
     if shutil.which("systemctl") is None:
         return 0  # nothing to undo
+
+    unit_file = _linux_unit_file()
+    has_unit = unit_file.exists()
+    label = "codebot.service"
+    action = "Disable + remove" if has_unit else "No systemd user unit to remove"
+    if has_unit and not _ui.confirm(f"{action} the {label} user unit?", default=True):
+        _ui.check("service", "WARN", "kept")
+        return 0
+    if not has_unit:
+        _ui.check("service", "INFO", action)
+        return 0
+
     # Best-effort disable (ignore non-zero — unit might already be gone).
     subprocess.run(
         ["systemctl", "--user", "disable", "--now", "codebot.service"],
         capture_output=True, check=False,
     )
-    removed = False
-    unit_file = _linux_unit_file()
-    if unit_file.exists():
-        try:
-            unit_file.unlink()
-            removed = True
-        except OSError as e:
-            print(f"[teardown.service] ERROR: cannot remove {unit_file}: {e}",
-                  file=sys.stderr)
-            return 1
-    subprocess.run(
-        ["systemctl", "--user", "daemon-reload"],
-        capture_output=True, check=False,
-    )
-    if removed:
-        print(f"[teardown.service] Removed {unit_file}")
-    else:
-        print("[teardown.service] No systemd user unit to remove.")
+    try:
+        unit_file.unlink()
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            capture_output=True, check=False,
+        )
+        _ui.check("service", "PASS", f"removed {unit_file}")
+    except OSError as e:
+        _ui.error(f"cannot remove {unit_file}: {e}")
+        return 1
     return 0
 
 
-def _teardown_service_macos(assume_yes: bool) -> int:
+def _teardown_service_macos() -> int:
     """Unload + remove the LaunchAgent."""
     if shutil.which("launchctl") is None:
         return 0
     agents_file = _mac_agents_file()
+    if not agents_file.exists():
+        _ui.check("service", "INFO", "no LaunchAgent to remove")
+        return 0
+
+    if not _ui.confirm(f"Unload + remove {agents_file}?", default=True):
+        _ui.check("service", "WARN", "kept")
+        return 0
+
     # Best-effort unload (ignore non-zero — agent might already be gone).
     subprocess.run(
         ["launchctl", "unload", "-w", str(agents_file)],
         capture_output=True, check=False,
     )
-    if agents_file.exists():
-        try:
-            agents_file.unlink()
-            print(f"[teardown.service] Removed {agents_file}")
-        except OSError as e:
-            print(f"[teardown.service] ERROR: cannot remove {agents_file}: {e}",
-                  file=sys.stderr)
-            return 1
-    else:
-        print("[teardown.service] No LaunchAgent to remove.")
+    try:
+        agents_file.unlink()
+        _ui.check("service", "PASS", f"removed {agents_file}")
+    except OSError as e:
+        _ui.error(f"cannot remove {agents_file}: {e}")
+        return 1
     return 0
 
 
-def _teardown_service_windows(assume_yes: bool) -> int:
+def _teardown_service_windows() -> int:
     """Delete the Task Scheduler task."""
     try:
-        r = subprocess.run(
-            ["schtasks", "/delete", "/tn", WIN_TASK_NAME, "/f"],
-            capture_output=True, text=True, check=False,
-        )
+        if not _ui.confirm(
+            f"Delete the Task Scheduler task '{WIN_TASK_NAME}'?", default=True,
+        ):
+            _ui.check("service", "WARN", "kept")
+            return 0
+        with _ui.spinner("schtasks /delete …"):
+            r = subprocess.run(
+                ["schtasks", "/delete", "/tn", WIN_TASK_NAME, "/f"],
+                capture_output=True, text=True, check=False,
+            )
     except FileNotFoundError:
         return 0
     # schtasks rc=1 with "does not exist" is fine — task was already gone.
     if r.returncode == 0:
-        print(f"[teardown.service] Removed Task Scheduler task '{WIN_TASK_NAME}'")
+        _ui.check("service", "PASS", f"removed task '{WIN_TASK_NAME}'")
         return 0
     err = (r.stderr or "").lower()
     if "cannot find" in err or "does not exist" in err:
-        print(f"[teardown.service] No Task Scheduler task '{WIN_TASK_NAME}' to remove.")
+        _ui.check("service", "INFO", f"no task '{WIN_TASK_NAME}' to remove")
         return 0
-    print(f"[teardown.service] WARN: schtasks /delete rc={r.returncode}",
-          file=sys.stderr)
+    _ui.warn(f"schtasks /delete rc={r.returncode}")
     if r.stderr:
         print(r.stderr.strip(), file=sys.stderr)
     return 1
@@ -386,36 +415,35 @@ def _teardown_service_windows(assume_yes: bool) -> int:
 # ==============================================================
 # Dispatch
 # ==============================================================
-HANDLERS: dict[str, Callable[[bool], int]] = {
+HANDLERS: dict[str, Callable[[], int]] = {
     "linux": _setup_service_linux,
     "darwin": _setup_service_macos,
     "win32": _setup_service_windows,
 }
 
-_TEARDOWN_HANDLERS: dict[str, Callable[[bool], int]] = {
+_TEARDOWN_HANDLERS: dict[str, Callable[[], int]] = {
     "linux": _teardown_service_linux,
     "darwin": _teardown_service_macos,
     "win32": _teardown_service_windows,
 }
 
 
-def run_service_setup(assume_yes: bool = True) -> int:
+def run_service_setup() -> int:
     """Run the per-platform auto-start installer. Called by setup.run_setup."""
     handler = HANDLERS.get(sys.platform)
     if handler is None:
-        print(f"[setup.service] unsupported platform: {sys.platform}", file=sys.stderr)
+        _ui.error(f"unsupported platform: {sys.platform}")
         return 2
-    return handler(assume_yes)
+    return handler()
 
 
-def run_service_teardown(assume_yes: bool = True) -> int:
+def run_service_teardown() -> int:
     """Reverse of ``run_service_setup``. Called by teardown.py."""
     handler = _TEARDOWN_HANDLERS.get(sys.platform)
     if handler is None:
-        print(f"[teardown.service] unsupported platform: {sys.platform}",
-              file=sys.stderr)
+        _ui.error(f"unsupported platform: {sys.platform}")
         return 2
-    return handler(assume_yes)
+    return handler()
 
 
 if __name__ == "__main__":

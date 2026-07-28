@@ -33,6 +33,17 @@ dependencies = [
     "PyYAML>=6.0",
     "click>=8.1.0",
     "platformdirs>=4.0",
+    # `codebotd setup` / `teardown` wizard UI. Upper bounds are the last
+    # releases that still declare requires-python >=3.8 support, so pip
+    # resolves questionary 2.1.0 + rich 14.x on 3.8 and the newest on 3.9+.
+    # prompt_toolkit comes in transitively via questionary, but the
+    # version questionary 2.1.0 was pinned against (3.0.49) is the last one
+    # that still exposes VSplit.content, which questionary.select() reaches
+    # into. Newer prompt_toolkit drops that attribute and select() crashes
+    # with AttributeError. questionary 2.1.1 fixes this but requires 3.9+.
+    "questionary>=2.0,<3",
+    "prompt_toolkit<3.0.50",
+    "rich>=13.7,<16",
     'importlib_resources>=1.3; python_version < "3.9"',
 ]
 
