@@ -13,7 +13,7 @@ Visual:
     |                                                |
     |      [icon]   TOKEN NOT SET                    |   <- title (bold)
     |                Set GITHUB_TOKEN env or         |   <- hint  (smaller)
-    |                github.token in config.yml      |
+    |                pages.github.token in config.yml|
     |                                                |
     +------------------------------------------------+
 

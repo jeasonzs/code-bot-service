@@ -34,7 +34,7 @@ from .render.pages.shortcuts import ShortcutsPage
 from .collectors.system import SystemCollector
 from .collectors.github import GithubCollector
 from .collectors.claude import ClaudeCollector
-from .config import Config
+from .config import Config, page_enabled
 
 
 log = logging.getLogger("codebot")
@@ -43,14 +43,42 @@ log = logging.getLogger("codebot")
 # ==============================================================
 # Page registry (order matches the 7-segment indicator)
 # ==============================================================
-def make_pages() -> list:
-    """Create the default page list."""
-    return [
-        ClockPage(),                       # 1
-        SystemPage(collector=None),        # 2 — collector wired in Daemon.__init__
-        GithubPage(collector=None),        # 3 — collector wired in Daemon.__init__
-        ClaudePage(collector=None),        # 4 — wired in Daemon.__init__
-    ]
+# Pages whose visibility is config-gated, mapped to their key under the
+# `pages:` section of config.yml. Anything not listed here is always
+# shown — Clock and System need no external configuration.
+_CONFIG_GATED_PAGES: dict[type, str] = {
+    GithubPage: "github",
+    ClaudePage: "claude",
+}
+
+
+def make_pages(config: Optional[Config] = None) -> list:
+    """Build the page list, dropping pages disabled in config.
+
+    Collectors are wired later in ``Daemon.__init__`` (constructed with
+    ``None`` here). Returning only the *enabled* pages keeps the rest of
+    the daemon free of per-page conditionals: the indicator segment
+    count, the next/prev modulo wrap and the refresh loops all derive
+    from ``len(self._pages)``.
+    """
+    if config is None:
+        config = Config()
+
+    pages = []
+    for page in (ClockPage(), SystemPage(collector=None),
+                 GithubPage(collector=None), ClaudePage(collector=None)):
+        key = _CONFIG_GATED_PAGES.get(type(page))
+        if key is not None:
+            page.enabled = page_enabled(config, key)
+            if not page.enabled:
+                log.info(
+                    "Page %r hidden: set pages.%s.enabled: true in %s "
+                    "(or re-run `codebotd setup`) to show it",
+                    page.title, key, config.path,
+                )
+                continue
+        pages.append(page)
+    return pages
 
 
 # ==============================================================
@@ -68,14 +96,14 @@ class Daemon:
         self.sim_port = sim_port
         self._stop = threading.Event()
         self._canvas = Canvas()
-        self._pages = make_pages()
+        # Load (and create if missing) the per-user config file *before*
+        # the page registry: page visibility comes from it. The
+        # collectors below share the same instance.
+        self._config = Config()
+        self._pages = make_pages(self._config)
         # 启动后默认显示第一页 (ClockPage)
         self._current_page = 0
         self._sys_collector = SystemCollector(hz=2.0)
-        # Load (and create if missing) the per-user config file. The
-        # collector uses it for the GitHub token; future subsystems can
-        # share the same instance.
-        self._config = Config()
         # GitHub stats refresh every 60s (well under the 5000 req/h limit
         # of a token-authenticated user). If GITHUB_TOKEN is unset the
         # collector simply never starts and the page shows "—".
@@ -151,6 +179,15 @@ class Daemon:
             if attempt < 2:
                 time.sleep(0.5)
         return False
+
+    def _has_page(self, cls: type) -> bool:
+        """True if a page of type ``cls`` is currently registered.
+
+        Used to skip starting collectors whose page the user disabled in
+        config — those collectors never tick anyway, so skipping them
+        avoids pointless network calls and file polls.
+        """
+        return any(isinstance(p, cls) for p in self._pages)
 
     def _supervise_usb(self) -> None:
         """Background thread: 设备掉线后自动重连。
@@ -418,8 +455,11 @@ class Daemon:
 
         # Start collectors
         self._sys_collector.start()
-        self._gh_collector.start()
-        self._claude_collector.start()
+        # Skip the network/file polls for pages that config disabled.
+        if self._has_page(GithubPage):
+            self._gh_collector.start()
+        if self._has_page(ClaudePage):
+            self._claude_collector.start()
         for p in self._pages:
             if hasattr(p, "refresh"):
                 p.refresh()

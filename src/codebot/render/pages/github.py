@@ -140,7 +140,7 @@ def _event_footer_item(snap: Optional[GithubSnapshot]) -> dict:
 _WARNING_BY_STATUS = {
     "no_token": (
         "GITHUB_TOKEN not set",
-        "Set $GITHUB_TOKEN env or github.token in ~/.code_bot/config.yml",
+        "Set $GITHUB_TOKEN env or pages.github.token in ~/.code_bot/config.yml",
         VSCodeDark.WARNING,
     ),
     "bad_auth": (

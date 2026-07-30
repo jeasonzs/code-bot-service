@@ -115,7 +115,7 @@ daemon——这样 token / Claude 集成配置都已经落盘,daemon 起来时�
 | `codebotd status` | 查看 daemon 状态（PID / ports / USB device） |
 | `codebotd doctor` | 环境诊断（Python / 依赖 / libusb / 设备枚举） |
 | `codebotd setup` | 一条命令搞定平台驱动 + 自启 + Claude 集成 |
-| `codebotd teardown` | `setup` 的反向：按 反向顺序 停 daemon → 清 Claude 集成 → 拆驱动。**不动** `~/.code_bot/config.yml`(GitHub token 保留) |
+| `codebotd teardown` | `setup` 的反向：按 反向顺序 停 daemon → 清 Claude 集成 → 拆驱动。**不动** `pages.github.token`(GitHub PAT 保留)；清 Claude 集成时会把 `pages.claude.enabled` 翻成 `false`。 |
 | `codebotd test-protocol` | USB 协议编解码自检 |
 
 ## Sudo 用法
@@ -202,7 +202,7 @@ LCD 的 GitHub 页要一个 personal access token（PAT）才有数据。
 ```
 
 - 输入是隐藏的（`getpass`），token 不会留在终端 scrollback 里。
-- 存进 `~/.code_bot/config.yml` 的 `github.token`，权限 600。
+- 存进 `~/.code_bot/config.yml` 的 `pages.github.token`，权限 600。
 - 存之前会拿 `GET /user` 验一下，通过会打印认证到的用户名；验不过（401 /
   离线）可以选择"仍然保存"，或重试，或跳过。
 - **随时可以跳过**：直接回车。之后补的两种办法：编辑
@@ -211,7 +211,31 @@ LCD 的 GitHub 页要一个 personal access token（PAT）才有数据。
 - `$GITHUB_TOKEN` 已经在环境里时整个 phase 跳过——运行时 env 优先于配置文件。
 - 非 TTY（CI / 管道 / `--doctor-only`）不会卡住：打印补配方式然后跳过。
 
-不配 token 也完全 OK —— 其他页面正常，只有 GitHub 页显示一个 warning banner。
+不配 token 也完全 OK —— **GitHub 页直接不显示**（`pages.github.enabled` 保持 `false`），其他页面照常工作；将来某次 `codebotd setup` 配上 token 之后那一页自动出现。
+
+## 页面开关
+
+`codebotd setup` 根据每阶段是否成功，自动翻转 `pages.<name>.enabled`：
+
+| 阶段 | 成功 → `enabled: true` | 失败 / 跳过 → `enabled: false` |
+|---|---|---|
+| Claude 集成（settings.json 写入）| ✅ | pre-flight 失败 / 用户跳过且之前没装过 |
+| GitHub token | 配好后（含 `$GITHUB_TOKEN` 已在 env / 用户保留旧 token） | 没有可用 token / 写盘失败 |
+
+Clock 页和 System 页**不参与开关**，始终显示（不需要任何外部配置）。
+
+如果想强制控制，手动改 `~/.code_bot/config.yml` 即可：
+
+```yaml
+pages:
+  github:
+    enabled: false      # 隐藏 GitHub 页
+    token: __REPLACE_ME__
+  claude:
+    enabled: true       # 显示 Claude 页
+```
+
+改完下次 daemon 启动生效。teardown 会清掉 `pages.claude.enabled`，但**不动** `pages.github.token`。
 
 ## 架构
 

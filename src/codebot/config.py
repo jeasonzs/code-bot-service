@@ -1,7 +1,8 @@
 """Project-wide user config (~/.code_bot/config.yml).
 
 Loaded once at daemon startup. The file holds per-user secrets and
-preferences (currently: the GitHub PAT). Behaviour on construction:
+preferences (currently: the GitHub PAT and per-page display toggles under
+``pages.<page_name>.``). Behaviour on construction:
 
   • File missing       → create it with ``DEFAULTS`` (mode 600).
   • File exists        → load it. For any key in ``DEFAULTS`` that is
@@ -43,8 +44,18 @@ DEFAULT_CONFIG_PATH: Path = Path.home() / ".code_bot" / "config.yml"
 # this dict on load. Trailing comments are docs; they're stripped on
 # save (PyYAML doesn't preserve them) but the file is still readable.
 DEFAULTS: dict[str, Any] = {
-    "github": {
-        "token":   "__REPLACE_ME__",   # GitHub PAT (env GITHUB_TOKEN overrides)
+    # All page-related config (credentials + display toggles + future
+    # settings) lives under ``pages.<page_name>``. Adding a new per-page
+    # field is purely additive — no schema break. Pages not listed here
+    # (Clock / System) have no config and are always shown.
+    "pages": {
+        "github": {
+            "token":   "__REPLACE_ME__",   # GitHub PAT; env GITHUB_TOKEN overrides
+            "enabled": False,              # flipped by `codebotd setup` phase 4
+        },
+        "claude": {
+            "enabled": False,              # flipped by `codebotd setup` phase 3
+        },
     },
 }
 
@@ -54,11 +65,11 @@ class Config:
 
     Access patterns:
 
-      cfg.get("github", "token")              # dotted look-up, default None
-      cfg.get("github", "token", "fallback")  # ... with explicit default
-      cfg.get("github")                       # the whole sub-dict
-      cfg.github.token                        # attribute access (sugar)
-      cfg.path                                # Path to the on-disk file
+      cfg.get("pages", "github", "token")           # nested look-up, default None
+      cfg.get("pages", "github", "enabled", default=False)  # ... with explicit default
+      cfg.get("pages", "github")                    # the whole sub-dict
+      cfg.pages                                     # attribute access (sugar)
+      cfg.path                                      # Path to the on-disk file
     """
 
     def __init__(self, path: Optional[Path] = None) -> None:
@@ -72,20 +83,22 @@ class Config:
         """Absolute path to the on-disk config file."""
         return self._path
 
-    def get(self, section: str, key: Optional[str] = None, default: Any = None) -> Any:
-        """Look up ``section`` (and optional ``key``) in the config.
+    def get(self, *keys: str, default: Any = None) -> Any:
+        """Look up a nested key path. ``default`` is returned when any
+        level is missing or a non-mapping is hit mid-path.
 
-        Returns ``default`` if either the section or the sub-key is
-        missing. Returns the whole sub-dict when ``key`` is ``None``.
+            cfg.get("pages", "github", "token")
+            cfg.get("pages", "github", "enabled", default=False)
+            cfg.get("pages", "github")           # whole sub-dict
         """
-        s = self._data.get(section)
-        if s is None:
-            return default
-        if key is None:
-            return s
-        if not isinstance(s, dict):
-            return default
-        return s.get(key, default)
+        cur: Any = self._data
+        for k in keys:
+            if not isinstance(cur, dict):
+                return default
+            if k not in cur:
+                return default
+            cur = cur[k]
+        return cur
 
     def __getattr__(self, name: str) -> Any:
         # __getattr__ is only called for attrs not found normally, so
@@ -96,17 +109,26 @@ class Config:
             raise AttributeError(name)
         return self._data.get(name)
 
-    def set(self, section: str, key: str, value: Any) -> None:
-        """Set ``section.key`` in memory. Call ``save()`` to persist.
+    def set(self, *keys: str, value: Any) -> None:
+        """Set a nested key path in memory. Call ``save()`` to persist.
 
-        Creates the section if missing; replaces it if the on-disk value
-        was not a mapping (corrupt file shouldn't block a legit write).
+            cfg.set("pages", "github", "token", value=tok)
+            cfg.set("pages", "github", "enabled", value=True)
+
+        Intermediate levels are created when missing and replaced when
+        the on-disk value isn't a mapping (a corrupt file shouldn't
+        block a legit write).
         """
-        s = self._data.get(section)
-        if not isinstance(s, dict):
-            s = {}
-            self._data[section] = s
-        s[key] = value
+        if not keys:
+            raise ValueError("set() requires at least one key")
+        d = self._data
+        for k in keys[:-1]:
+            nxt = d.get(k)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                d[k] = nxt
+            d = nxt
+        d[keys[-1]] = value
 
     def save(self) -> None:
         """Rewrite the on-disk file from the in-memory state. Used by
@@ -227,3 +249,25 @@ def _migrate(loaded: dict[str, Any], defaults: dict[str, Any] = DEFAULTS) -> boo
             if _migrate(loaded[k], default_v):
                 changed = True
     return changed
+
+
+# ---- page toggles ----
+
+PAGES_SECTION = "pages"
+
+
+def page_enabled(cfg: "Config", name: str, default: bool = False) -> bool:
+    """``pages.<name>.enabled`` 的便捷读取。"""
+    return bool(cfg.get(PAGES_SECTION, name, "enabled", default=default))
+
+
+def set_page_enabled(cfg: "Config", name: str, enabled: bool) -> None:
+    """持久化 ``pages.<name>.enabled``。
+
+    Best-effort: ``Config.save()`` 在 I/O 错误时只 log 不抛（daemon 启动
+    路径上不希望 read-only home 致命），调用方如果必须确保落盘应自行读
+    回验证。
+    """
+    cfg.set(PAGES_SECTION, name, "enabled", value=bool(enabled))
+    cfg.save()
+    log.info("pages.%s.enabled = %s (%s)", name, enabled, cfg.path)

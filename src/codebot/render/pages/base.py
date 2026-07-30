@@ -19,7 +19,9 @@ class BasePage(ABC):
     #: Page title shown at top
     title: str = "Page"
 
-    #: Whether this page is enabled (from YAML config)
+    #: Whether this page is shown. Stamped from config by ``make_pages()``
+    #: for config-gated pages (see codebot.config.DEFAULTS["pages"]);
+    #: pages that need no configuration keep the default.
     enabled: bool = True
 
     #: Set True to skip the daemon chrome (top page-indicator bar + title).

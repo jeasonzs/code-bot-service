@@ -64,6 +64,23 @@ def _detect_claude() -> "tuple[bool, str]":
     return False, f"no {_SETTINGS_PATH}, no `claude` on PATH"
 
 
+def _has_codebot_blocks(settings: Path) -> bool:
+    """Does ``settings`` already carry codebot's ``statusLine`` block?
+
+    Used when the user skips the Claude phase: skipping must not disable
+    a page that a previous ``codebotd setup`` run already wired up.
+    """
+    statusline_cmd, _ = _console_script_names()
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    sl = data.get("statusLine")
+    return isinstance(sl, dict) and str(sl.get("command", "")).endswith(statusline_cmd)
+
+
 # Wizard choices for the Claude phase. Defined as constants because the
 # select() default has to be one of them verbatim.
 _CHOICE_CONFIGURE = "Configure the Claude hooks + statusline"
@@ -144,6 +161,22 @@ def _console_script_names() -> tuple[str, str]:
     return ("codebot-claude-statusline", "codebot-claude-status-hook")
 
 
+def _record_page_toggle(enabled: bool) -> None:
+    """Mirror the install state into ``~/.code_bot/config.yml`` so the
+    daemon shows/hides the Claude page.
+
+    Never raises — a config write failure must not fail the Claude
+    phase. The toggle defaults to ``False`` on a fresh install; only an
+    actual install (or a settings.json that already carries our blocks)
+    flips it on.
+    """
+    try:
+        from ..config import Config, set_page_enabled
+        set_page_enabled(Config(), "claude", enabled)
+    except Exception as e:  # noqa: BLE001 — best effort
+        log.warning("could not record pages.claude.enabled=%s: %s", enabled, e)
+
+
 def _backup_existing(settings: Path) -> Path | None:
     if not settings.exists():
         return None
@@ -210,6 +243,9 @@ def run_install(*, settings_path: Path | None = None) -> int:
         settings_path = _resolve_settings_path()
         if settings_path is None:
             _ui.check("Claude Code", "INFO", "skipped — re-run `codebotd setup` later")
+            # A previous setup may have wired things up; skipping now
+            # must not hide a working page.
+            _record_page_toggle(_has_codebot_blocks(_SETTINGS_PATH))
             return 1
 
     statusline_cmd, hook_cmd = _console_script_names()
@@ -232,6 +268,7 @@ def run_install(*, settings_path: Path | None = None) -> int:
             "Reinstall the package: pip install --force-reinstall codebot",
             statusline_cmd, hook_cmd,
         )
+        _record_page_toggle(False)
         return 2
 
     # Backup.
@@ -294,6 +331,8 @@ def run_install(*, settings_path: Path | None = None) -> int:
     _ui.check("statusline", "PASS", f"{statusline_cmd} -> {state_file}")
     _ui.check("hooks", "PASS", f"{hook_cmd} ({len(_HOOK_EVENTS)} events) -> {status_file}")
     _ui.check("settings", "PASS", f"wrote {settings_path}")
+    _record_page_toggle(True)
+    _ui.check("Claude page", "PASS", "enabled on the device")
     _ui.info("Restart Claude Code (or open a new session) for changes to take effect.")
     return 0
 
@@ -313,6 +352,7 @@ def run_uninstall(*, settings_path: Path | None = None) -> int:
     target = settings_path or _SETTINGS_PATH
     if not target.exists():
         _ui.check("Claude Code", "INFO", f"no {target}; nothing to remove")
+        _record_page_toggle(False)
         return 0
 
     try:
@@ -326,6 +366,7 @@ def run_uninstall(*, settings_path: Path | None = None) -> int:
 
     if "statusLine" not in existing and "hooks" not in existing:
         _ui.check("Claude Code", "INFO", f"no codebot entries in {target}")
+        _record_page_toggle(False)
         return 0
 
     if not _ui.confirm(
@@ -355,6 +396,7 @@ def run_uninstall(*, settings_path: Path | None = None) -> int:
     os.replace(tmp, target)
 
     _ui.check("Claude Code", "PASS", f"removed statusLine + hooks from {target}")
+    _record_page_toggle(False)
     _ui.info("Restart Claude Code (or open a new session) for changes to take effect.")
     return 0
 

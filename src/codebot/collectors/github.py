@@ -123,7 +123,7 @@ class GithubCollector:
             from ..config import Config
             config = Config()
         env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-        cfg_token = config.get("github", "token") or ""
+        cfg_token = config.get("pages", "github", "token") or ""
         self._token = env_token or cfg_token
         if not env_token and cfg_token:
             log.info("Loaded GitHub token from %s", config.path)
@@ -139,7 +139,7 @@ class GithubCollector:
                 latest_event_repo=None, latest_event_ts=None,
                 ts=0.0,
                 token_status="no_token",
-                token_error="Set GITHUB_TOKEN env or github.token in ~/.code_bot/config.yml",
+                token_error="Set GITHUB_TOKEN env or pages.github.token in ~/.code_bot/config.yml",
             )
 
     @property
