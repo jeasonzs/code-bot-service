@@ -7,9 +7,12 @@ Invoked indirectly by ``codebotd setup`` (phase 2/4). Three branches:
               suggest plugdev group membership.
   macOS    — no install needed (pyusb uses IOKit). Guide user through the
               first-plug TCC prompt and provide a reset hint.
-  Windows  — install windows/codebot-inface0.inf via pnputil (needs
-              Administrator), binding interface 0 (Vendor) to WinUSB while
-              leaving interface 1 (HID Keyboard) on the system default.
+  Windows  — no install needed. The firmware exposes MS OS 2.0 Descriptors
+              that cause Windows 8.1+ to bind Interface 0 (Vendor Bulk) to
+              the inbox ``winusb.sys`` driver on first plug. Interface 1
+              (HID Keyboard) is bound by the standard HID class driver.
+              No INF, no admin shell, no signature — the device is driver-
+              free from the moment it's plugged in.
 
 The doctor pre-flight and the failure-aggregation with subsequent phases
 (service / claude) live in ``codebot.setup.run_setup``; this module
@@ -32,13 +35,6 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
-import tempfile
-# Python 3.8 ships `importlib.resources` without `files()` (added in 3.9);
-# fall back to the backport so the package installs cleanly on 3.8 too.
-try:
-    from importlib.resources import files
-except ImportError:  # pragma: no cover — only hit on Python < 3.9
-    from importlib_resources import files  # type: ignore[no-redef]
 from pathlib import Path
 from typing import Callable
 
@@ -52,34 +48,12 @@ from .os_helper import run_as_root  # noqa: E402 — privilege helper, after log
 # ==============================================================
 # Asset resolution
 # ==============================================================
-def _materialize_traversable(traversable) -> Path:
-    """Return a real on-disk Path for an importlib Traversable.
-
-    Flat-installed wheels (``pip install codebot``) expose Traversables as
-    filesystem paths and ``str(t)`` returns a usable path. Zip-installed
-    wheels don't, so we copy the content into a NamedTemporaryFile.
-    """
-    try:
-        p = Path(str(traversable))
-        if p.exists():
-            return p
-    except OSError:
-        pass
-    suffix = "".join(traversable.suffixes)
-    with tempfile.NamedTemporaryFile(
-        prefix=f"{traversable.name}.", suffix=suffix or ".tmp",
-        delete=False, mode="w", encoding="utf-8",
-    ) as tmp:
-        tmp.write(traversable.read_text(encoding="utf-8"))
-        return Path(tmp.name)
-
-
 def _udev_rules_src() -> Path:
-    return _materialize_traversable(files("codebot") / "udev" / "99-codebot.rules")
-
-
-def _windows_inf_src() -> Path:
-    return _materialize_traversable(files("codebot") / "windows" / "codebot-inface0.inf")
+    try:
+        from importlib.resources import files
+    except ImportError:  # pragma: no cover — only on Python < 3.9
+        from importlib_resources import files  # type: ignore[no-redef]
+    return files("codebot") / "udev" / "99-codebot.rules"
 
 
 # ==============================================================
@@ -87,7 +61,7 @@ def _windows_inf_src() -> Path:
 # ==============================================================
 def _setup_linux() -> int:
     src = _udev_rules_src()
-    if not src.exists():
+    if not Path(str(src)).exists():
         _ui.error(f"udev rules not found at {src}")
         return 2
 
@@ -198,69 +172,32 @@ def _setup_macos() -> int:
 # Windows
 # ==============================================================
 def _setup_windows() -> int:
-    inf = _windows_inf_src()
-    if not inf.exists():
-        _ui.error(f"INF not found at {inf}")
-        return 2
+    """Windows driver setup is a no-op — MS OS 2.0 handles binding.
 
-    _ui.check("driver", "INFO", f"will install {inf}")
-    _ui.info("binds interface 0 (Vendor) to WinUSB; HID interface untouched")
+    The firmware's BOS + MS OS 2.0 Descriptor Set declares Interface 0 as
+    WinUSB-compatible. On Windows 8.1+ the host requests those descriptors
+    at enumeration time and binds Interface 0 to inbox ``winusb.sys``
+    automatically — no INF, no admin shell, no signature. Interface 1
+    (HID Keyboard) is bound by the standard HID class driver the same way
+    every USB keyboard is.
 
-    is_admin = _is_windows_admin()
-    if not is_admin:
-        _ui.warn("this step needs Administrator privileges")
-        _ui.hint([
-            "Re-run from an Administrator PowerShell or cmd:",
-            "",
-            "      codebotd setup",
-        ])
-        # Default False: attempting without elevation just fails noisily.
-        if not _ui.confirm(
-            "Attempt the install anyway? (will fail if not elevated)",
-            default=False,
-        ):
-            _ui.check("driver", "WARN", "skipped — re-run as Administrator")
-            return 1
-
-    # Prompting is done; safe to spawn the subprocess now.
-    try:
-        with _ui.spinner("Running pnputil /add-driver…"):
-            r = subprocess.run(
-                ["pnputil", "/add-driver", str(inf), "/install"],
-                capture_output=True, text=True, timeout=60,
-            )
-    except FileNotFoundError:
-        _ui.error("pnputil not found in PATH")
-        return 2
-    except subprocess.TimeoutExpired:
-        _ui.error("pnputil timed out after 60s")
-        return 2
-
-    if r.stdout.strip():
-        _ui.info(r.stdout.strip())
-    if r.returncode != 0:
-        _ui.error(f"pnputil exit={r.returncode}")
-        if r.stderr:
-            print(r.stderr, file=sys.stderr)
-        if not is_admin:
-            return 1
-        return 2
-
-    _ui.check("driver", "PASS", "WinUSB binding installed")
+    What this function still does:
+      - surfaces a clear status so users can tell "no install" from
+        "skip happened silently"
+      - points users at `codebotd doctor` if a probe fails
+    """
+    _ui.check("driver", "PASS", "no install needed (MS OS 2.0 → inbox WinUSB)")
     _ui.hint([
-        "Replug the device (or run: pnputil /scan-devices)",
-        "and verify with `codebotd doctor`.",
+        "Code Bot uses Microsoft OS 2.0 Descriptors to declare Interface 0",
+        "(Vendor Bulk) as WinUSB-compatible. Windows 8.1+ binds it to the",
+        "inbox winusb.sys driver on first plug — no INF, no admin shell.",
+        "",
+        "If `codebotd doctor` does not see the device:",
+        "  • replug once (host may need a fresh enumeration)",
+        "  • check Device Manager → Universal Serial Bus devices",
+        "  • verify Windows version ≥ 8.1",
     ])
     return 0
-
-
-def _is_windows_admin() -> bool:
-    """Best-effort admin check without requiring pywin32."""
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except (AttributeError, OSError):
-        return False
 
 
 # ==============================================================
@@ -322,46 +259,17 @@ def _teardown_macos() -> int:
 
 
 def _teardown_windows() -> int:
-    """Remove the WinUSB binding via pnputil. Needs Administrator."""
-    if not _is_windows_admin():
-        _ui.check("driver", "WARN", "removing the WinUSB binding needs Administrator")
-        _ui.hint([
-            "Re-run from an Administrator PowerShell:",
-            "",
-            "      codebotd teardown",
-        ])
-        return 1
+    """No driver was installed on Windows; nothing to undo.
 
-    if not _ui.confirm(
-        r"Remove the WinUSB binding for USB\VID_1A86&PID_CB0B?",
-        default=True,
-    ):
-        _ui.check("driver", "WARN", "kept")
-        return 0
-
-    try:
-        with _ui.spinner("Running pnputil /remove-device…"):
-            r = subprocess.run(
-                ["pnputil", "/remove-device", r"USB\VID_1A86&PID_CB0B"],
-                capture_output=True, text=True, timeout=60,
-            )
-    except FileNotFoundError:
-        _ui.error("pnputil not found in PATH")
-        return 2
-    except subprocess.TimeoutExpired:
-        _ui.error("pnputil timed out after 60s")
-        return 2
-
-    if r.stdout.strip():
-        _ui.info(r.stdout.strip())
-    if r.returncode != 0:
-        # rc != 0 can mean device not currently bound; that's OK.
-        _ui.check("driver", "WARN", f"pnputil exit={r.returncode}")
-        if r.stderr:
-            print(r.stderr.strip(), file=sys.stderr)
-        return 1
-    _ui.check("driver", "PASS", r"removed WinUSB binding for USB\VID_1A86&PID_CB0B")
-    _ui.info("Replug the device — Windows falls back to the default driver.")
+    The MS OS 2.0 → inbox winusb.sys binding lives in the device's USB
+    descriptors and the host's per-device state. Unplugging the device
+    is the only "teardown" Windows recognises; replug rebinds cleanly.
+    """
+    _ui.check("driver", "INFO", "nothing to undo (no INF was installed)")
+    _ui.hint([
+        "If the WinUSB binding got into a bad state, just unplug the",
+        "device for a few seconds and replug — Windows rebinds cleanly.",
+    ])
     return 0
 
 

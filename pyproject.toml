@@ -69,7 +69,6 @@ codebot = [
     "fonts/*.ttf",
     "icons/*.png",
     "udev/*.rules",
-    "windows/*.inf",
     "systemd/*.service.in",
     "launchd/*.plist.in",
     "_vendor/libusb/windows-*/*.dll",

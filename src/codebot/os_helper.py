@@ -13,10 +13,9 @@ would re-exec into root's env and break imports.
 
 Scope is intentionally POSIX-only: macOS and Linux both have
 ``os.geteuid()`` and ``sudo``, so the helper works on both. Windows uses
-UAC for elevation (a fundamentally different mechanism), so Windows
-branches in ``driver_setup`` keep their existing
-``subprocess.run([..., "pnputil", ...])`` direct-call pattern — that
-path requires the user to launch from an Administrator shell.
+UAC for elevation (a fundamentally different mechanism); Windows
+driver setup needs no admin shell because the firmware uses MS OS 2.0
+Descriptors to bind to inbox winusb.sys at plug-in time.
 """
 
 from __future__ import annotations

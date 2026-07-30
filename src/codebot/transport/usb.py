@@ -64,7 +64,7 @@ def _load_libusb_native() -> None:
     Linux:  system libusb-1.0.so.0 via ctypes.util.find_library.
     macOS:  no-op (pyusb uses IOKit).
     Windows: codebot._vendor.libusb/windows-{arch}/libusb-1.0.dll via
-             os.add_dll_directory; failure is non-fatal (WinUSB fallback).
+             os.add_dll_directory; failure is non-fatal.
 
     Raises:
         RuntimeError: on Linux when system libusb is not installed.
@@ -94,8 +94,10 @@ def _load_libusb_native() -> None:
         return
 
     if sys.platform == "win32":
-        # Vendor .dll fallback — primary path on Windows is WinUSB which
-        # does not need libusb-1.0.dll at all.
+        # Vendor .dll — pyusb's libusb1 backend needs libusb-1.0.dll on
+        # PATH. The matching driver (libusbK or libusb-win32) is installed
+        # once via Zadig, replacing the inbox winusb.sys that the firmware
+        # binds via MS OS 2.0 Descriptors on first plug.
         try:
             # Python 3.8 lacks importlib.resources.files — use the backport
             # there (declared as a conditional dep in pyproject.toml).
@@ -110,9 +112,9 @@ def _load_libusb_native() -> None:
             ctypes.CDLL(dll_path)
             log.debug("loaded vendor libusb: %s", dll_path)
         except (ImportError, OSError, FileNotFoundError) as e:
-            # Not fatal: WinUSB backend (the default after setup-driver)
-            # does not need libusb.dll.
-            log.debug("vendor libusb dll not loaded (%s); WinUSB backend OK", e)
+            # Not fatal: pyusb will look on PATH next (libusb-package,
+            # manual install, etc).
+            log.debug("vendor libusb dll not loaded (%s); checking PATH", e)
         return
 
     log.debug("libusb loader: platform %s untested, skipping", sys.platform)

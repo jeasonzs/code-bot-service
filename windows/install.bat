@@ -36,28 +36,14 @@ if not exist "%NSSM_PATH%" (
     exit /b 1
 )
 
-REM --- Install driver (best-effort) -------------------------------------------
+REM --- Driver step is intentionally skipped --------------------------------
+REM Code Bot is driver-free on Windows: the firmware exposes MS OS 2.0
+REM Descriptors that bind Interface 0 (Vendor Bulk) to inbox winusb.sys
+REM on first plug. No INF, no pnputil, no admin shell required.
 echo.
-echo === Step 1: Install WinUSB INF (if not already done) ===
-where pnputil >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    pushd "%~dp0\.."
-    if exist "src\codebot\windows\codebot-inface0.inf" (
-        echo   Installing INF...
-        pnputil /add-driver "src\codebot\windows\codebot-inface0.inf" /install
-        if %ERRORLEVEL% neq 0 (
-            echo   [WARN] INF install failed (exit=%ERRORLEVEL%); service install will continue
-        ) else (
-            echo   INF installed OK
-        )
-    ) else (
-        echo   [WARN] INF not found at src\codebot\windows\codebot-inface0.inf
-        echo          Run 'codebotd setup-driver' after install
-    )
-    popd
-) else (
-    echo   [WARN] pnputil not in PATH; skipping INF install
-)
+echo === Step 1: Driver — driver-free (MS OS 2.0 → inbox winusb.sys) ===
+echo   Nothing to install. Plug in the device once after this script
+echo   finishes, and Windows will auto-bind WinUSB on first enumeration.
 
 REM --- Install service via NSSM -----------------------------------------------
 echo.

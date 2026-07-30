@@ -20,7 +20,7 @@ codebotd start
 
 `codebotd setup` 自动：
 1. 先跑 `codebotd doctor` 检查环境（FAIL 仅 warn，不阻塞）
-2. 按平台分支：装 udev 规则（Linux）/ WinUSB INF（Windows）/ 提示 macOS TCC
+2. 按平台分支：装 udev 规则（Linux）/ 提示即插即用（Windows, MS OS 2.0 免驱）/ 提示 macOS TCC
 3. 注册 daemon 自启：systemd 用户级 unit（Linux）/ LaunchAgent（macOS）/ Task Scheduler 任务（Windows）
 4. 把 Claude Code statusline + 8 lifecycle hooks 合并进 `~/.claude/settings.json`
 
@@ -135,59 +135,50 @@ codebotd doctor
 ### 系统要求
 
 - Python ≥ 3.10（python.org 安装，**不要** Microsoft Store stub）
-- Windows 10 1809+ / Windows 11
+- Windows 10 1809+ / Windows 11（任意版本均支持 MS OS 2.0 Descriptor）
 - pyusb ≥ 1.x
-- 管理员权限（一次性）
+- **不需要**管理员权限（这是 v0.18 起的关键改进）
 
-### 安装 WinUSB 驱动
+### 安装：免驱
 
-**重要**：Code Bot 是复合设备 — 接口 0 (Vendor) + 接口 1 (HID Keyboard)。
-`codebot-inface0.inf` **只绑定接口 0 到 WinUSB**，接口 1 保持系统默认驱动，
-保证 HID 键盘功能不丢。
+Code Bot 用 [Microsoft OS 2.0 Descriptors](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-os-2-0-descriptors-specification)
+在固件里声明 Interface 0 (Vendor Bulk) 为 WinUSB 兼容。Windows 8.1+
+在设备首次插入时会主动拉这个 descriptor，并自动把 Interface 0 绑到
+inbox `winusb.sys`——**无需 INF、无需管理员 shell、无需代码签名**。
+
+Interface 1 (HID Keyboard) 走标准 HID 类驱动，跟普通 USB 键盘没区别。
 
 ```powershell
-# 以管理员身份运行 PowerShell 或 cmd
+# 任意 PowerShell / cmd, 不需要管理员
+pip install codebot
 codebotd setup
 ```
 
-这会调 `pnputil /add-driver codebot-inface0.inf /install`，然后注册
-Task Scheduler 任务 `CodeBot`（onlogon trigger，运行 `codebotd start`）。
-
-如果之前用 Zadig 绑定过整个设备，需要先卸载：
-
-```powershell
-pnputil /remove-device "USB\VID_1A86&PID_CB0B"
-# 然后拔掉重新插
-codebotd setup
-```
-
-### vendor libusb.dll (可选 fallback)
-
-主路径是 WinUSB 驱动（系统自带），不需要 libusb。万一 WinUSB 不工作，
-project vendored 了 `libusb-1.0.dll`（windows-x86_64 子目录）作为 fallback，
-启动时会自动尝试加载；加载失败也只是 warning，不会阻断 daemon。
+`codebotd setup` 的 Windows 分支不再调 `pnputil`——它就是一次 pass-through，
+告诉你「插上设备就能用」，然后注册 Task Scheduler 任务
+`CodeBot`（onlogon trigger，运行 `codebotd start`）。
 
 ### 验证
 
 ```powershell
 codebotd doctor
-# 期望: libusb: loaded vendor ...libusb-1.0.dll [PASS]
-# 或    libusb: vendor dll not loaded (...); WinUSB backend OK [INFO]
+# 期望: USB backend: winusb1 backend available [PASS]
 # 期望: USB device scan: PASS found device bus=N addr=M
 ```
 
-打开 **设备管理器** → USB Controller / Universal Serial Bus devices → 找
-"WCH USB FS Device" 或 "Code Bot USB Display (Interface 0 - Vendor)"。
-右键 → 属性 → 驱动程序 → 确认是 "WinUSB" 提供商。
+打开 **设备管理器** → Universal Serial Bus devices → 找到 "Code Bot
+USB Display (Interface 0 - Vendor)"。右键 → 属性 → 驱动程序 → 提供商
+应显示 "Microsoft"，驱动日期是 inbox `winusb.sys` 的版本。
 
 ### 故障排查
 
 | 现象 | 修复 |
 |---|---|
-| `pnputil exit=5` (access denied) | 需要管理员 PowerShell |
-| `pnputil exit=259` (no device) | 设备没插；INF 仅描述接口 0，设备必须在场 |
-| `NoBackendError` | `codebotd doctor` 检查 vendor dll 是否加载；WinUSB 路径应该 OK |
-| 设备管理器显示黄色警告 | 卸载设备 → 拔掉 → 重插 → `codebotd setup` |
+| `USB backend FAIL` (winusb1) | 重装 pyusb: `pip install --upgrade pyusb` |
+| `USB device scan INFO not found` | 拔掉重插一次，让 host 重新枚举 |
+| `device not configured` | 重新插设备；WinUSB 绑定有时需要 replug 触发 |
+| 设备管理器显示黄色警告 | 卸载设备 → 拔掉 → 重插；MS OS 2.0 重新触发绑定 |
+| 误用 Zadig 绑过整个设备 | 设备管理器卸载 → 拔掉 → 重插（WinUSB 绑定是 inbox 的，Zadig 装的是 libusb-win32，会覆盖） |
 
 ---
 
@@ -206,8 +197,8 @@ codebotd doctor
 | `Python version FAIL` | 全平台 | 装 Python 3.10-3.13 |
 | `pyusb FAIL` | 全平台 | `pip install codebot[usb]` |
 | `libusb FAIL on Linux` | Linux | `sudo apt install libusb-1.0-0` |
-| `USB device scan INFO not found` | 全平台 | 插设备；跑 `codebotd setup` |
-| `vendor libusb dll not loaded` | Windows | 可忽略（WinUSB 后端足够） |
+| `USB backend FAIL on Windows` | Windows | `pip install --upgrade pyusb` (winusb1 模块) |
+| `USB device scan INFO not found` | 全平台 | 插设备；首次插时 Windows 自动绑 WinUSB |
 
 ## 卸载
 
@@ -217,7 +208,6 @@ codebotd doctor
    (停 daemon,避免 collector 与后续清理 race)
 2. `~/.claude/settings.json` 里的 `statusLine` + `hooks` 块(备份后删除)
 3. udev 规则(系统级 `/etc/udev/rules.d/` 和用户级 `~/.config/udev/rules.d/` 两处)
-   / WinUSB INF 绑定(Windows,需管理员)
 
 **保留**:`~/.code_bot/config.yml`(GitHub token 不删),`~/.local/share/codebot/`
 状态文件,`~/.code-bot/` 运行时目录——重跑 `codebotd setup` 时这些不需要重建。
@@ -230,15 +220,16 @@ pip uninstall codebot
 
 幂等：再跑一次是 no-op。
 
-## libusb 加载策略（P3.3 设计）
+## libusb 加载策略（v0.18 重构）
 
 | 平台 | pyusb backend | libusb 二进制来源 |
 |---|---|---|
-| Linux | libusb | 系统包 `libusb-1.0-0` |
-| macOS | IOKit | 不需要 |
-| Windows | WinUSB 主路径 | 系统自带，无需 libusb.dll |
-| Windows | libusb fallback | project vendor `libusb-1.0.dll` |
+| Linux | libusb1 | 系统包 `libusb-1.0-0` |
+| macOS | IOKit | 不需要（pyusb 用 ctypes 调系统 framework） |
+| Windows | winusb1 | 不需要（inbox `winusb.sys`，MS OS 2.0 自动绑） |
 
-**为什么要 vendor libusb.dll**：极少数 Windows PC 上 WinUSB 绑定失败，
-vendor .dll 让 pyusb 仍能工作（走 libusb 后端）。Linux/macOS 不 vendor
-避免 libc / codesign 兼容性问题。
+**Windows 不再 vendor libusb.dll**：v0.18 之前 project vendored 了
+`libusb-1.0.dll` 作为 WinUSB 失败时的 fallback，但 MS OS 2.0 Descriptor
+让 inbox `winusb.sys` 在首次插入时自动生效，WinUSB 绑定不会再失败——
+vendor dll 反而引入了「万一装上 libusb-win32 而不是 inbox winusb」
+这种 silent override 问题。所以 v0.18 起彻底删掉。
