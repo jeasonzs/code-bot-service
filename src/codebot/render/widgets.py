@@ -113,7 +113,7 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
             str(Path.home() / ".local/share/fonts/NotoSansCJK-Regular.ttc"),
             # macOS
             "/System/Library/Fonts/PingFang.ttc",
-            "/Library/Fonts/Songti.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
             # Windows
             "C:\\Windows\\Fonts\\msyh.ttc",
             os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\msyh.ttc"),
