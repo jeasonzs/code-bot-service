@@ -106,8 +106,10 @@ def _load_libusb_native() -> None:
             except ImportError:  # pragma: no cover — only on Python < 3.9
                 from importlib_resources import files  # type: ignore[no-redef]
             vendor = files("codebot._vendor.libusb")
-            arch = "windows-x86_64" if struct.calcsize("P") == 8 else "windows-x86"
-            dll_path = str(vendor / arch / "libusb-1.0.dll")
+            # x86_64-only: Python 3.13+ dropped 32-bit Windows; x86 wheels
+            # stopped being built upstream. A 32-bit Python will hit the
+            # OSError fallback below and log a clear "no DLL" message.
+            dll_path = str(vendor / "windows-x86_64" / "libusb-1.0.dll")
             os.add_dll_directory(os.path.dirname(dll_path))
             ctypes.CDLL(dll_path)
             log.debug("loaded vendor libusb: %s", dll_path)

@@ -106,7 +106,7 @@ def run_setup(*, doctor_only: bool = False) -> int:
                 "  codebotd doctor",
                 "  systemctl --user status codebot.service   (Linux)",
                 "  launchctl list | grep codebot             (macOS)",
-                "  schtasks /query /tn CodeBot               (Windows)",
+                "  sc query codebotd                         (Windows)",
             ])
         else:
             _ui.warn(

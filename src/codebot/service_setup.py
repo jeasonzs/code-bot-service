@@ -13,10 +13,11 @@ Invoked by ``codebotd setup`` (phase 3/5). Three branches:
               ``~/Library/LaunchAgents/com.codebot.codebotd.plist``, then
               ``launchctl load -w``.
 
-  Windows  — register a per-user Task Scheduler task (``onlogon`` trigger,
-              run with highest privileges, ``/f`` to overwrite). No admin
-              needed: matches the daemon's per-user USB scope, equivalent
-              to ``systemd --user`` / ``~/Library/LaunchAgents``.
+  Windows  — register a real Windows Service via NSSM (``SERVICE_AUTO_START``,
+              runs in Session 0 at boot, no console window). Requires NSSM
+              on PATH (or at a well-known install path) and an elevated shell.
+              Replaces the older ``schtasks /create /sc onlogon`` path, which
+              only started after user logon and showed a foreground console.
 
 ``assume_yes`` is no longer a parameter; whether the handler prompts
 is decided by ``codebot._ui.is_interactive()``. ``codebotd setup`` is
@@ -31,6 +32,7 @@ Return codes:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -110,6 +112,35 @@ def _mac_agents_file() -> Path:
 
 
 WIN_TASK_NAME = "CodeBot"
+WIN_SERVICE_NAME = "codebotd"
+
+
+def _find_nssm() -> Path | None:
+    """Locate nssm.exe. Checks PATH first, then common install locations
+    (choco's default, scoop, manual drops). Returns None if not found."""
+    found = shutil.which("nssm")
+    if found:
+        return Path(found)
+    for c in (
+        Path(r"C:\Tools\nssm\win64\nssm.exe"),
+        Path(r"C:\Program Files\nssm\win64\nssm.exe"),
+        Path(r"C:\Program Files (x86)\nssm\win64\nssm.exe"),
+        Path(r"C:\ProgramData\chocolatey\lib\nssm\tools\nssm.exe"),
+    ):
+        if c.exists():
+            return c
+    return None
+
+
+def _is_windows_admin() -> bool:
+    """True if the current process is elevated (UAC accepted). NSSM install
+    requires admin; fail fast with a clear hint instead of a cryptic
+    'access denied' from sc.exe."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 # ==============================================================
@@ -255,66 +286,128 @@ def _mac_uid() -> str:
 
 
 # ==============================================================
-# Windows: Task Scheduler per-user task
+# Windows: NSSM-managed Windows Service (autostart at boot, no console)
 # ==============================================================
 def _setup_service_windows() -> int:
+    nssm = _find_nssm()
+    if nssm is None:
+        _ui.error(
+            "NSSM not found. Install it first:\n"
+            "    choco install nssm          (Chocolatey)\n"
+            "    scoop install nssm          (Scoop)\n"
+            "    or download from https://nssm.cc/download"
+        )
+        return 1
+
     codebotd_path = shutil.which("codebotd")
     if codebotd_path is None:
         _ui.error("`codebotd` not on PATH — reinstall the package")
         return 2
 
     if not _ui.confirm(
-        f"Register the codebotd Task Scheduler task '{WIN_TASK_NAME}' (onlogon, highest privileges)?",
+        f"Register codebotd as a Windows Service via NSSM "
+        f"(autostart at boot, no console window — runs in Session 0)?",
         default=True,
     ):
-        _ui.check("service", "WARN", "skipped — register it by hand later")
+        _ui.check("service", "WARN", "skipped — install by hand later")
         return 0
 
-    # schtasks /tr parses the command line; wrap path in quotes so it survives
-    # spaces (e.g. C:\Program Files\Python311\Scripts\codebotd.exe).
-    tr = f'"{codebotd_path}" start'
-
-    try:
-        with _ui.spinner("schtasks /create …"):
-            subprocess.run(
-                [
-                    "schtasks", "/create",
-                    "/tn", WIN_TASK_NAME,
-                    "/tr", tr,
-                    "/sc", "onlogon",
-                    "/rl", "HIGHEST",
-                    "/f",
-                ],
-                capture_output=True, text=True, check=True,
-            )
-    except FileNotFoundError:
-        _ui.error("schtasks not found in PATH")
+    if not _is_windows_admin():
+        _ui.error(
+            "NSSM install requires Administrator privileges. "
+            "Re-run `codebot setup` from an elevated cmd / PowerShell "
+            "(or accept the UAC prompt)."
+        )
         return 1
+
+    # Use the Python interpreter running THIS setup so `-m codebot` resolves
+    # to the same env (pip, pipx, uv tool install — all share sys.executable).
+    python_exe = sys.executable
+    log_dir = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "codebot"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _ui.warn(f"can't create {log_dir}: {e}; NSSM will fall back to its own path")
+
+    install_cmd = [
+        str(nssm), "install", WIN_SERVICE_NAME,
+        python_exe, "-m", "codebot", "start",
+    ]
+    try:
+        with _ui.spinner(f"nssm install {WIN_SERVICE_NAME} …"):
+            subprocess.run(install_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        _ui.error(f"schtasks failed (rc={e.returncode})")
+        _ui.error(f"nssm install failed (rc={e.returncode})")
         if e.stderr:
             print(e.stderr, file=sys.stderr)
         return 1
+    except FileNotFoundError:
+        _ui.error(f"nssm.exe vanished between {nssm} and exec")
+        return 1
 
-    _ui.check("service", "PASS", f"registered task '{WIN_TASK_NAME}' (onlogon)")
-    _ui.info(f"  /tr={tr}")
+    # Configure: auto-start at boot, rotated logs, restart on failure.
+    settings = [
+        ("DisplayName",           "Code Bot USB info display daemon (CH32X033F8P6)"),
+        ("Start",                 "SERVICE_AUTO_START"),
+        ("AppStdout",             str(log_dir / "codebotd.out.log")),
+        ("AppStderr",             str(log_dir / "codebotd.err.log")),
+        ("AppStdoutCreationTime", "0"),
+        ("AppStderrCreationTime", "0"),
+        ("AppRotateFiles",        "1"),
+        ("AppRotateBytes",        "1048576"),
+        ("RestartOnFailureDelay", "5000"),
+    ]
+    for k, v in settings:
+        subprocess.run(
+            [str(nssm), "set", WIN_SERVICE_NAME, k, v],
+            check=False, capture_output=True, text=True,
+        )
 
-    # Best-effort query so the user gets an immediate confirmation.
+    # Silent upgrade: if a previous codebot-setup run left the legacy
+    # onlogon task behind, drop it so it doesn't double-start the daemon.
+    subprocess.run(
+        ["schtasks", "/delete", "/tn", WIN_TASK_NAME, "/f"],
+        check=False, capture_output=True, text=True,
+    )
+
+    # Start the service. `nssm start` returns non-zero if the service is
+    # already running or SCM rejects it — warn but don't fail the install.
+    try:
+        with _ui.spinner(f"nssm start {WIN_SERVICE_NAME} …"):
+            r = subprocess.run(
+                [str(nssm), "start", WIN_SERVICE_NAME],
+                capture_output=True, text=True, check=False,
+            )
+        if r.returncode != 0:
+            _ui.warn(f"nssm start rc={r.returncode}")
+            if r.stderr:
+                print(r.stderr.strip(), file=sys.stderr)
+            _ui.hint([f"    sc start {WIN_SERVICE_NAME}    (manual start)"])
+    except FileNotFoundError:
+        _ui.error("nssm.exe vanished during start")
+        return 1
+
+    # Probe via sc query so the user sees the service state immediately.
     probe = subprocess.run(
-        ["schtasks", "/query", "/tn", WIN_TASK_NAME],
+        ["sc", "query", WIN_SERVICE_NAME],
         capture_output=True, text=True, check=False,
     )
     if probe.returncode == 0:
-        # Just the first non-empty line of the query output (status header).
         first = next((ln.strip() for ln in probe.stdout.splitlines() if ln.strip()), "")
         _ui.info(f"  status: {first}")
     else:
-        _ui.info("  (query failed; verify with `schtasks /query /tn CodeBot`)")
+        _ui.info(f"  (sc query rc={probe.returncode}; verify with `sc query {WIN_SERVICE_NAME}`)")
 
+    _ui.check("service", "PASS", f"registered service '{WIN_SERVICE_NAME}' (SERVICE_AUTO_START)")
     _ui.hint([
-        "Trigger the task now without waiting for next logon:",
+        f"Service runs at boot (no user logon required), no console window.",
+        f"Manage via services.msc, or:",
+        f"    nssm edit {WIN_SERVICE_NAME}             (open NSSM GUI)",
+        f"    sc query {WIN_SERVICE_NAME}",
+        f"    sc stop  {WIN_SERVICE_NAME}",
+        f"    nssm remove {WIN_SERVICE_NAME} confirm   (uninstall)",
         "",
-        f"    schtasks /run /tn {WIN_TASK_NAME}",
+        f"Logs: {log_dir}\\codebotd.{{out,err}}.log",
     ])
     return 0
 
@@ -384,32 +477,78 @@ def _teardown_service_macos() -> int:
 
 
 def _teardown_service_windows() -> int:
-    """Delete the Task Scheduler task."""
-    try:
-        if not _ui.confirm(
-            f"Delete the Task Scheduler task '{WIN_TASK_NAME}'?", default=True,
-        ):
-            _ui.check("service", "WARN", "kept")
-            return 0
-        with _ui.spinner("schtasks /delete …"):
-            r = subprocess.run(
-                ["schtasks", "/delete", "/tn", WIN_TASK_NAME, "/f"],
-                capture_output=True, text=True, check=False,
-            )
-    except FileNotFoundError:
+    """Remove the codebotd Windows Service (NSSM) and, if present, the
+    legacy onlogon Task Scheduler task left by older ``codebot setup`` runs."""
+    nssm = _find_nssm()
+
+    has_svc = False
+    if nssm is not None:
+        # sc query returns rc=0 only if the service exists.
+        probe = subprocess.run(
+            ["sc", "query", WIN_SERVICE_NAME],
+            capture_output=True, text=True, check=False,
+        )
+        has_svc = probe.returncode == 0
+
+    # Detect legacy onlogon task from the previous install path.
+    legacy = subprocess.run(
+        ["schtasks", "/query", "/tn", WIN_TASK_NAME],
+        capture_output=True, text=True, check=False,
+    )
+    has_legacy_task = legacy.returncode == 0
+
+    if not has_svc and not has_legacy_task:
+        _ui.check("service", "INFO", "no codebot service or task to remove")
         return 0
-    # schtasks rc=1 with "does not exist" is fine — task was already gone.
-    if r.returncode == 0:
-        _ui.check("service", "PASS", f"removed task '{WIN_TASK_NAME}'")
+
+    if not _ui.confirm(
+        f"Remove the codebotd Windows Service (and/or legacy task)?",
+        default=True,
+    ):
+        _ui.check("service", "WARN", "kept")
         return 0
-    err = (r.stderr or "").lower()
-    if "cannot find" in err or "does not exist" in err:
-        _ui.check("service", "INFO", f"no task '{WIN_TASK_NAME}' to remove")
-        return 0
-    _ui.warn(f"schtasks /delete rc={r.returncode}")
-    if r.stderr:
-        print(r.stderr.strip(), file=sys.stderr)
-    return 1
+
+    rc = 0
+    if has_svc and nssm is not None:
+        # Best-effort stop (ignore rc — service may already be stopped).
+        subprocess.run(
+            [str(nssm), "stop", WIN_SERVICE_NAME],
+            capture_output=True, check=False,
+        )
+        r = subprocess.run(
+            [str(nssm), "remove", WIN_SERVICE_NAME, "confirm"],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode == 0:
+            _ui.check("service", "PASS", f"removed service '{WIN_SERVICE_NAME}'")
+        else:
+            _ui.warn(f"nssm remove rc={r.returncode}")
+            if r.stderr:
+                print(r.stderr.strip(), file=sys.stderr)
+            rc = 1
+
+    if has_legacy_task:
+        try:
+            with _ui.spinner(f"schtasks /delete /tn {WIN_TASK_NAME} …"):
+                r = subprocess.run(
+                    ["schtasks", "/delete", "/tn", WIN_TASK_NAME, "/f"],
+                    capture_output=True, text=True, check=False,
+                )
+        except FileNotFoundError:
+            return rc
+        if r.returncode == 0:
+            _ui.check("service", "PASS", f"removed legacy task '{WIN_TASK_NAME}'")
+        else:
+            err = (r.stderr or "").lower()
+            if "cannot find" in err or "does not exist" in err:
+                _ui.check("service", "INFO", f"no task '{WIN_TASK_NAME}' to remove")
+            else:
+                _ui.warn(f"schtasks /delete rc={r.returncode}")
+                if r.stderr:
+                    print(r.stderr.strip(), file=sys.stderr)
+                rc = 1
+
+    return rc
 
 
 # ==============================================================

@@ -1,4 +1,13 @@
 @echo off
+REM ==============================================================
+REM  DEPRECATED: prefer `codebot setup` from an elevated shell.
+REM  This script is kept as a manual fallback for users who can't
+REM  (or don't want to) run the Python installer. It does the same
+REM  thing — registers codebotd as a real Windows Service via NSSM
+REM  with SERVICE_AUTO_START and no console window.
+REM
+REM  Use this script only if you need to bypass `codebot setup`.
+REM ==============================================================
 REM Install codebotd as a Windows service using NSSM.
 REM Run as Administrator.
 
