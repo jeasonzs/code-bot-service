@@ -40,6 +40,14 @@ from .config import Config, page_enabled
 log = logging.getLogger("codebot")
 
 
+# Horizontal swipe thresholds.
+HORIZ_THRESH_PX = 30
+HORIZ_RATIO = 2.0
+ANIM_DURATION_MS = 500
+COMMIT_PX_THRESHOLD = SCREEN_W // 2
+COMMIT_VEL_THRESHOLD = 0.5
+
+
 # ==============================================================
 # Page registry (order matches the 7-segment indicator)
 # ==============================================================
@@ -141,6 +149,21 @@ class Daemon:
         # 必须在 _find_and_open 之前置 True,关闭 is_open 翻转 → 主循环观察的窗口。
         self._usb_resyncing: bool = False
 
+        # Horizontal swipe state machine (DOWN/MOVE/UP -> page transition).
+        self._touch_active: bool = False
+        self._touch_down_x: int = 0
+        self._touch_down_y: int = 0
+        self._touch_down_t: float = 0.0
+        self._touch_dx: int = 0
+        self._touch_target_page: int = 0
+        self._touch_last_move_t: float = 0.0
+        self._touch_last_move_dx: int = 0
+        self._touch_animating: bool = False
+        self._touch_anim_t0: float = 0.0
+        self._touch_anim_offset0: int = 0
+        self._touch_anim_offset1: int = 0
+        self._touch_commit: bool = False
+
         # P3.2: dual-fan architecture — both channels always started.
         # USB.open() is attempted lazily in run(); if device missing, sim
         # still serves the user.
@@ -230,26 +253,173 @@ class Daemon:
     def _handle_touch(self, event_type: int, x: int, y: int) -> None:
         """Process a touch event from the device.
 
-        event_type: 0=DOWN, 1=MOVE, 2=UP, 3=SWIPE_LEFT, 4=SWIPE_RIGHT, 5=LONG_PRESS
+        Horizontal swipes are recognized host-side from DOWN/MOVE/UP
+        triples; SWIPE_LEFT/RIGHT legacy events are no longer dispatched.
         """
-        log.info("Touch: type=%d x=%d y=%d", event_type, x, y)
-        if event_type == TouchEvent.SWIPE_LEFT:
-            self._next_page()
-        elif event_type == TouchEvent.SWIPE_RIGHT:
-            self._prev_page()
+        now = time.monotonic()
+        log.debug("Touch: type=%d x=%d y=%d", event_type, x, y)
+        if event_type == TouchEvent.DOWN:
+            self._on_touch_down(x, y, now)
+        elif event_type == TouchEvent.MOVE:
+            self._on_touch_move(x, y, now)
+        elif event_type == TouchEvent.UP:
+            self._on_touch_up(x, y, now)
         elif event_type == TouchEvent.LONG_PRESS:
-            # Long-press on current page - dispatch action
             self._dispatch_long_press(x, y)
 
-    def _next_page(self) -> None:
-        self._current_page = (self._current_page + 1) % len(self._pages)
-        log.info("Page: %d/%d (%s)", self._current_page + 1, len(self._pages),
-                 self._pages[self._current_page].title)
+    def _on_touch_down(self, x: int, y: int, now: float) -> None:
+        # Mid-animation: ignore new gestures (let the in-flight settle).
+        if self._touch_animating:
+            return
+        # Cancel any in-progress touch (e.g. UP missed) and start fresh.
+        self._touch_active = True
+        self._touch_down_x = x
+        self._touch_down_y = y
+        self._touch_down_t = now
+        self._touch_dx = 0
+        self._touch_last_move_t = now
+        self._touch_last_move_dx = 0
+        self._touch_target_page = self._current_page
 
-    def _prev_page(self) -> None:
-        self._current_page = (self._current_page - 1) % len(self._pages)
-        log.info("Page: %d/%d (%s)", self._current_page + 1, len(self._pages),
-                 self._pages[self._current_page].title)
+    def _on_touch_move(self, x: int, y: int, now: float) -> None:
+        if not self._touch_active:
+            return
+        dx = x - self._touch_down_x
+        dy = y - self._touch_down_y
+        # Horizontal gate: dx must dominate dy and exceed threshold.
+        if abs(dx) < HORIZ_THRESH_PX or abs(dx) < HORIZ_RATIO * abs(dy):
+            return
+        # Pick neighbor: dx < 0 means finger moves left → next page (content
+        # flows left, like turning a book page forward). dx > 0 → prev page.
+        # At the first/last page, refuse to wrap: target stays at current
+        # so the gesture rubber-bands back on UP.
+        n = len(self._pages)
+        if dx < 0 and self._current_page < n - 1:
+            target = self._current_page + 1
+        elif dx > 0 and self._current_page > 0:
+            target = self._current_page - 1
+        else:
+            target = self._current_page
+        if target != self._touch_target_page:
+            self._touch_target_page = target
+        self._touch_dx = dx
+        self._touch_last_move_t = now
+        self._touch_last_move_dx = dx
+        # Follow-finger: render swipe frame at current dx, push sim + USB.
+        self._compose_swipe_frame(dx)
+        self._sim.update_image(self._canvas.image)
+        if self._usb.is_open:
+            self._flush_full_to_device()
+
+    def _on_touch_up(self, x: int, y: int, now: float) -> None:
+        if not self._touch_active:
+            return
+        if self._touch_animating:
+            # Should not happen (DOWN guarded), but be defensive.
+            self._touch_active = False
+            return
+        dx = self._touch_dx
+        # Velocity from DOWN to UP — a "flick" feels fast across the whole
+        # gesture, not just the tail (the tail is always fast at the end of
+        # any pull, so last-MOVE-to-UP dt over-flips slow drags into flicks).
+        dt_ms = max(1.0, (now - self._touch_down_t) * 1000.0)
+        velocity = abs(dx) / dt_ms
+        # Edge rubber-band must always rollback, even if the throw passed
+        # the commit threshold — the target_page was clamped to current_page
+        # in _on_touch_move, so "committing" would actually wrap the page.
+        at_edge = (self._touch_target_page == self._current_page)
+        commit = (
+            not at_edge
+            and (velocity >= COMMIT_VEL_THRESHOLD
+                 or abs(dx) >= COMMIT_PX_THRESHOLD)
+        )
+        # Decide animation endpoints. dx sign tells us which neighbor is target.
+        if commit and dx != 0:
+            self._touch_commit = True
+            self._touch_anim_offset0 = dx
+            if dx > 0:
+                self._touch_anim_offset1 = SCREEN_W
+            else:
+                self._touch_anim_offset1 = -SCREEN_W
+        else:
+            # Rollback: animate back to current page.
+            self._touch_commit = False
+            self._touch_target_page = self._current_page
+            self._touch_anim_offset0 = dx
+            self._touch_anim_offset1 = 0
+        self._touch_anim_t0 = now
+        self._touch_animating = True
+        # Defer clearing _touch_active until animation completes.
+
+    def _finish_swipe_animation(self) -> None:
+        """Called when the post-UP tween reaches offset1. Commit or rollback."""
+        if self._touch_commit and self._touch_target_page != self._current_page:
+            self._current_page = self._touch_target_page
+            log.info("Page: %d/%d (%s)", self._current_page + 1, len(self._pages),
+                     self._pages[self._current_page].title)
+        # Reset state machine.
+        self._touch_active = False
+        self._touch_animating = False
+        self._touch_dx = 0
+        self._touch_commit = False
+
+    def _tick_swipe_animation(self, now: float) -> bool:
+        """Advance the swipe tween. Returns True if a frame was composed."""
+        if not self._touch_animating:
+            return False
+        elapsed_ms = (now - self._touch_anim_t0) * 1000.0
+        t = max(0.0, min(1.0, elapsed_ms / ANIM_DURATION_MS))
+        # Ease-out cubic for natural deceleration.
+        eased = 1.0 - (1.0 - t) ** 3
+        offset = int(self._touch_anim_offset0 +
+                     (self._touch_anim_offset1 - self._touch_anim_offset0) * eased)
+        self._compose_swipe_frame(offset)
+        if t >= 1.0:
+            self._finish_swipe_animation()
+        return True
+
+    def _compose_swipe_frame(self, offset_px: int) -> None:
+        """Paint a single swipe frame into self._canvas.
+
+        prev = current page, next = target page (_touch_target_page).
+        Both rendered into throwaway canvases so chrome stays consistent
+        across the swipe. On rollback or page-edge rubber-band the target
+        equals current_page, so the "other side" is filled with the
+        background color (BG) instead of duplicating the current page.
+        """
+        prev_canvas = self._render_page_to_canvas(self._current_page)
+        if self._touch_target_page == self._current_page:
+            # Edge rubber-band: only the current page shifts; the rest of
+            # the canvas is BG so the user sees "nothing to pull into".
+            self._canvas.fill(VSCodeDark.BG)
+            self._canvas.image.paste(prev_canvas.image, (offset_px, 0))
+            return
+        next_canvas = self._render_page_to_canvas(self._touch_target_page)
+        self._canvas.paint_swipe(prev_canvas, next_canvas, offset_px)
+
+    def _render_page_to_canvas(self, page_idx: int) -> "Canvas":
+        """Render a page (with chrome) into a fresh canvas; used for swipe frames."""
+        c = Canvas()
+        page = self._pages[page_idx]
+        page.render(c)
+        if not page.skip_chrome:
+            self._draw_chrome_into(c, page_idx)
+        return c
+
+    def _draw_chrome_into(self, canvas: "Canvas", page_idx: int) -> None:
+        """Same chrome as _draw_chrome, but into a caller-provided canvas."""
+        total = len(self._pages)
+        seg_w = SCREEN_W // total
+        for i in range(total):
+            x = i * seg_w
+            color = VSCodeDark.INDICATOR_ACTIVE if i == page_idx else VSCodeDark.INDICATOR_BASE
+            canvas.paste_rect(color, x, 0, seg_w - 1, 4)
+        from PIL import ImageDraw
+        from .render.widgets import get_font
+        draw = ImageDraw.Draw(canvas.image)
+        font = get_font("default", 12)
+        title = self._pages[page_idx].title
+        draw.text((6, 8), title, fill=(VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b), font=font)
 
     def _dispatch_long_press(self, x: int, y: int) -> None:
         """Handle long-press: action buttons in current page."""
@@ -379,7 +549,17 @@ class Daemon:
         Both channels are pushed independently — if USB is not open, only
         sim receives the frame; if USB is open, both sim (browser) and the
         device see the same frame. Channels never block each other.
+
+        Swipe-in-progress: bypass normal render; paint a swipe frame instead
+        and force a full-screen flush.
         """
+        now = time.monotonic()
+        if self._touch_active or self._touch_animating:
+            self._tick_swipe_animation(now)
+            self._sim.update_image(self._canvas.image)
+            if self._usb.is_open:
+                self._flush_full_to_device()
+            return
         self._render_current()
         if not self._pages[self._current_page].skip_chrome:
             self._draw_chrome()
@@ -388,6 +568,19 @@ class Daemon:
         # USB 仅在设备真连上时推
         if self._usb.is_open:
             self._flush_to_device()
+
+    def _flush_full_to_device(self) -> None:
+        """Send the entire canvas to the device (bypass dirty-rect diff)."""
+        if self._usb_resyncing or not self._usb.is_open:
+            return
+        pixels = self._canvas.to_rgb565_bytes()
+        if not self._usb.send_frame(
+            build_draw_rect_begin(0, 0, SCREEN_W, SCREEN_H),
+            timeout=500,
+        ):
+            return
+        self._usb.write_pixels(pixels)
+        self._usb.send_frame(build_draw_rect_end(), timeout=200)
 
     def _stop_handler(self, signum, frame) -> None:
         log.info("Signal %d received, stopping...", signum)
@@ -479,7 +672,10 @@ class Daemon:
                 if self._usb.is_open:
                     self._poll_usb()
                 # Render at fixed rate (动态 render_hz, 设备状态变了立即切换)
-                render_hz = 15 if self._usb.is_open else 8
+                if self._touch_active or self._touch_animating:
+                    render_hz = 60
+                else:
+                    render_hz = 15 if self._usb.is_open else 8
                 if render_hz != last_render_hz:
                     log.info("Render rate: %d Hz (USB %s)",
                              render_hz, "connected" if self._usb.is_open else "disconnected")

@@ -131,3 +131,17 @@ class Canvas:
         rects and leave the device LCD out of sync.
         """
         self._prev_image = None
+
+    def paint_swipe(self, prev: "Canvas", next: "Canvas", offset_px: int) -> None:
+        """Compose a swipe-frame: prev page at offset_px + next page at offset_px - sign*W.
+
+        offset_px is the finger's horizontal displacement (positive = right,
+        negative = left). The whole image shifts WITH the finger; next sits
+        on the side the finger is pulling from.
+        Caller must have already rendered prev/next (including chrome).
+        """
+        self.image.paste(prev.image, (offset_px, 0))
+        if offset_px >= 0:
+            self.image.paste(next.image, (offset_px - SCREEN_W, 0))
+        else:
+            self.image.paste(next.image, (offset_px + SCREEN_W, 0))

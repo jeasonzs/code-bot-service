@@ -223,7 +223,6 @@ const lastEvt = document.getElementById('last-evt');
 
 let downX = 0, downY = 0, downT = 0, isDown = false;
 let longPressTimer = null;
-const SWIPE_THRESHOLD = 50;
 const LONG_PRESS_MS = 600;
 
 function postTouch(event, x, y) {
@@ -270,17 +269,10 @@ function onUp(e) {
   e.preventDefault();
   const {x, y} = eventCoords(e);
   clearTimeout(longPressTimer);
-  const dx = x - downX, dy = y - downY;
-  const dist2 = dx*dx + dy*dy;
   const dur = Date.now() - downT;
 
-  // Long press release (if we fired LONG_PRESS and held ≥ 600ms)
   if (dur >= LONG_PRESS_MS) {
     postTouch(6, downX, downY);  // 6 = LONG_PRESS_RELEASE
-  } else if (dist2 >= SWIPE_THRESHOLD * SWIPE_THRESHOLD) {
-    // Swipe (only if not a long press)
-    if (dx < 0) postTouch(3, x, y);  // 3 = SWIPE_LEFT
-    else        postTouch(4, x, y);  // 4 = SWIPE_RIGHT
   }
   postTouch(2, x, y);  // 2 = UP
   isDown = false;
@@ -297,8 +289,15 @@ canvas.addEventListener('touchmove',  e => onMove(e.touches[0]),  {passive: fals
 canvas.addEventListener('touchend',   e => onUp(e.changedTouches[0]), {passive: false});
 
 // 高层按钮 (直接 POST, 不走 canvas 坐标)
-document.getElementById('swipe-l').onclick = () => postTouch(3, 10,  H/2);
-document.getElementById('swipe-r').onclick = () => postTouch(4, W-10, H/2);
+// ◀ Swipe Left / Swipe Right ▶ 模拟 down+move+up 三段, 让 daemon 走完整动画
+function fireSwipe(fromX, toX) {
+  const y = H/2;
+  postTouch(0, fromX, y);
+  postTouch(1, toX,   y);
+  postTouch(2, toX,   y);
+}
+document.getElementById('swipe-l').onclick = () => fireSwipe(W*0.7, W*0.1);
+document.getElementById('swipe-r').onclick = () => fireSwipe(W*0.3, W*0.9);
 document.getElementById('long-press').onclick = () => {
   postTouch(0, W/2, H/2);          // DOWN
   setTimeout(() => postTouch(5, W/2, H/2), 50);   // LONG_PRESS
