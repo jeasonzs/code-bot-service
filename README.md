@@ -69,7 +69,7 @@ codebotd setup                       # 默认非交互；Linux 上 udev 那一�
                                      # Python 进程保持在用户 env 不动
                                      # （不被 sudo 切换到 root env，避免
                                      # `pip install --user` 下找不到 codebot）
-                                     # Windows 用管理员 PowerShell 同理
+                                     # Windows 用普通 PowerShell 即可
 #   或 CI / Docker:
 codebotd setup --doctor-only         # 只验证环境，不动任何东西
 
@@ -88,7 +88,7 @@ pip uninstall codebot                # 单独卸载 Python 包
 
 - **Linux**：装 udev 规则 + 注册 systemd 用户级 unit（用户登录自启）
 - **macOS**：TCC 提示 + 写 `~/Library/LaunchAgents/com.codebot.codebotd.plist` + `launchctl load -w`
-- **Windows**：装 WinUSB INF（管理员） + 注册 Task Scheduler 任务（onlogon）
+- **Windows**：免驱（MS OS 2.0 Descriptor → inbox winusb.sys，插上即用）+ 注册 Task Scheduler 任务（onlogon，纯 schtasks，无需管理员 / 无需 NSSM）
 
 倒数第二步（phase 4）会问你要不要配 GitHub token（LCD 的 GitHub 页要用）。
 **直接回车就跳过**，随时可以之后补。最后一步（phase 5）才装自启 + 拉起
@@ -148,7 +148,7 @@ $ codebotd setup
 | `pip install codebot` / `pipx install codebot` | **否**（用户空间） |
 | `apt install libusb-1.0-0` / `dnf install libusb` 等系统包 | **是**（一次性） |
 | `codebotd start` / `stop` / `status` / `doctor` | **否**（用户态 daemon：systemd `--user` / LaunchAgent / Task Scheduler 用户任务） |
-| `codebotd setup` / `teardown` | **内部 sudo（仅 udev 那一步 shell 命令）**；Windows 用管理员 PowerShell；macOS 不需要 |
+| `codebotd setup` / `teardown` | **内部 sudo（仅 udev 那一步 shell 命令）**；Windows 用普通 PowerShell 即可；macOS 不需要 |
 | `apt install python3-pip` / `pipx` 等系统包 | **是**（一次性） |
 
 **已经 root 的容器 / 远程 chroot**：`codebotd setup` 直接跑就行

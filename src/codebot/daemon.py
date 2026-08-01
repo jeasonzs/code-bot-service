@@ -527,6 +527,6 @@ def run_daemon(foreground: bool = True, config_path: Optional[str] = None,
     """
     daemon = Daemon(config_path=config_path, verbose=verbose, sim_port=sim_port)
     if not foreground:
-        # TODO: proper daemonization (P4 will add systemd/launchd/NSSM)
+        # TODO: proper daemonization (P4 will add systemd/launchd/Task Scheduler)
         log.warning("Daemon mode not fully implemented, running in foreground")
     daemon.run()
