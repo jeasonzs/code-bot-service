@@ -466,6 +466,7 @@ class Daemon:
 
         last_render = 0.0
         last_collect_refresh = 0.0
+        last_ping_at = 0.0  # USB PING 心跳 (设备 2400ms timeout, 1s 间隔留 ~2s 容差)
         # sim 8fps 省 CPU / 带宽, USB 15fps 让画面顺
         # 动态求值: 设备重连后立即切换到 15fps,断开后回到 8fps
         last_render_hz = 0
@@ -478,6 +479,10 @@ class Daemon:
                 self._drain_touch_queue()
                 if self._usb.is_open:
                     self._poll_usb()
+                    # 1s PING: 设备 2400ms timeout 内必收到, 容差宽
+                    if now - last_ping_at >= 1.0:
+                        self._usb.send_ping()
+                        last_ping_at = now
                 # Render at fixed rate (动态 render_hz, 设备状态变了立即切换)
                 render_hz = 15 if self._usb.is_open else 8
                 if render_hz != last_render_hz:
