@@ -70,15 +70,26 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
             os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\consola.ttf"),
         ]
     elif name == "bold":
+        # Linux 按文件名区分字重 (拆开的 Bold .ttf); macOS .ttc 多面打包, 走 index。
         candidates = [
+            # Linux 系统级
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+            # Linux 兜底 (非 Bold, 至少拿到 mono)
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            # Linux 用户级
             str(Path.home() / ".local/share/fonts/JetBrainsMono-Bold.ttf"),
             str(Path.home() / ".fonts/JetBrainsMono-Bold.ttf"),
+            # macOS — 用户装
             "/Library/Fonts/JetBrainsMono-Bold.ttf",
+            # macOS 系统级: 旧版 SFMono-Bold.otf 独立文件, M1+ 合并到 SFNSMono.ttf (内含 Bold 面)
             "/System/Library/Fonts/SFMono-Bold.otf",
+            ("/System/Library/Fonts/SFNSMono.ttf", 1),
+            # Menlo.ttc 永远在, Bold 在第 1 面 — 最后兜底
+            ("/System/Library/Fonts/Menlo.ttc", 1),
+            # macOS 用户级
             str(Path.home() / "Library/Fonts/JetBrainsMono-Bold.ttf"),
+            # Windows 系统级
             "C:\\Windows\\Fonts\\consolab.ttf",
             os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\consolab.ttf"),
         ]
@@ -121,10 +132,12 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
     else:
         candidates = []
 
-    for path in candidates:
+    for entry in candidates:
+        # 兼容 (path, index) 元组 — Linux 按文件名区分字重, macOS .ttc 走 face index
+        path, idx = entry if isinstance(entry, tuple) else (entry, 0)
         if Path(path).exists():
             try:
-                font = ImageFont.truetype(path, size)
+                font = ImageFont.truetype(path, size, index=idx)
                 break
             except OSError:
                 continue
