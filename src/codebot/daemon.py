@@ -216,7 +216,7 @@ class Daemon:
                     # 否则 diff 命中"canvas 跟 _prev_image 一致"→ [] → 设备 LCD 残留旧图。
                     if self._usb.send_frame(build_set_brightness(80)):
                         self._stop.wait(0.1)
-                        self._usb.send_frame(build_clear(0x0000))
+                        # self._usb.send_frame(build_clear(0x0000))
                     self._canvas.mark_all_dirty()
                     backoff = 1.0
                     self._stop.wait(1.0)
@@ -435,7 +435,7 @@ class Daemon:
             # Send initial brightness + clear
             self._usb.send_frame(build_set_brightness(80))
             time.sleep(0.1)
-            self._usb.send_frame(build_clear(0x0000))
+            # self._usb.send_frame(build_clear(0x0000))
         else:
             log.warning(
                 "Code Bot USB device not found; running in sim-only mode. "
