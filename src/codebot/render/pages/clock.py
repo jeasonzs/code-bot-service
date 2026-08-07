@@ -63,7 +63,7 @@ class ClockPage(BasePage):
         )
         time_font = get_font("bold", 60)
         draw_text_centered(canvas, time_str, SCREEN_W // 2, 50,
-                           time_font, _WHITE)
+                           time_font, VSCodeDark.FG)
 
         # ---- MS row: ".mmm" smaller bold SUCCESS green, centered ----
         ms_str = ".{0:03d}".format(now.microsecond // 1000)
