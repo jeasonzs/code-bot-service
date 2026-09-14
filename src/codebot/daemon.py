@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import queue
 import signal
+import subprocess
 import sys
 import os
 import time
@@ -31,6 +32,7 @@ from .render.pages.github import GithubPage
 from .render.pages.claude import ClaudePage
 from .render.pages.placeholders import OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
+from .render.pages.commands import CommandsPage, CommandItem
 from .collectors.system import SystemCollector
 from .collectors.github import GithubCollector
 from .collectors.claude import ClaudeCollector
@@ -49,7 +51,36 @@ log = logging.getLogger("codebot")
 _CONFIG_GATED_PAGES: dict[type, str] = {
     GithubPage: "github",
     ClaudePage: "claude",
+    CommandsPage: "custom_commands",
 }
+
+_COMMANDS_PER_PAGE = 2
+
+
+def _build_commands_pages(config: Config) -> list:
+    """Chunk ``pages.custom_commands.items`` into 2-per-page slices.
+
+    Each chunk becomes a :class:`CommandsPage` instance. Empty item list
+    produces an empty list (no CommandsPage added to the page registry).
+    """
+    raw_items = config.get("pages", "custom_commands", "items", default=[]) or []
+    items = [
+        CommandItem(
+            name=str(entry.get("name", "")),
+            icon_path=str(entry.get("icon", "")),
+            command=str(entry.get("command", "")),
+        )
+        for entry in raw_items
+        if isinstance(entry, dict)
+    ]
+    if not items:
+        return []
+    pages: list = []
+    for i in range(0, len(items), _COMMANDS_PER_PAGE):
+        chunk = items[i:i + _COMMANDS_PER_PAGE]
+        if chunk:
+            pages.append(CommandsPage(chunk))
+    return pages
 
 
 def make_pages(config: Optional[Config] = None) -> list:
@@ -78,6 +109,16 @@ def make_pages(config: Optional[Config] = None) -> list:
                 )
                 continue
         pages.append(page)
+
+    if page_enabled(config, "custom_commands"):
+        cmd_pages = _build_commands_pages(config)
+        if cmd_pages:
+            pages.extend(cmd_pages)
+        else:
+            log.info(
+                "Custom Commands hidden: pages.custom_commands.items is empty; "
+                "run `codebotd setup` (phase 5) to populate it"
+            )
     return pages
 
 
@@ -131,6 +172,20 @@ class Daemon:
         # Touch event queue: HTTP thread (sim) 或 USB poll 都把事件 push 进来,
         # 主循环统一 drain → _handle_touch, 避免 _handle_touch 跨线程调用
         self._touch_queue: queue.Queue = queue.Queue()
+        # DOWN→UP click candidate (x, y). MOVE clears it; UP fires _dispatch_click
+        # if the candidate is still alive. SWIPE/LONG_PRESS are chip-level
+        # gestures and take a separate path.
+        self._pending_click: Optional[tuple[int, int]] = None
+        # GUI session env discovered once at startup (see session.discover_session_env).
+        # The daemon itself runs detached (systemd / nohup / SSH) and has no
+        # DISPLAY of its own; custom commands need a session env to launch
+        # GUI apps. Already-set keys win, discovered keys fill the gaps.
+        from .session import discover_session_env, detect_terminal_emulator
+        self._session_env: dict[str, str] = discover_session_env()
+        # Terminal emulator for wrapping custom commands so the user
+        # actually sees the command run on their desktop. ``None`` means
+        # no terminal was found; commands then fire in the background.
+        self._terminal: Optional[tuple[str, tuple[str, ...]]] = detect_terminal_emulator()
 
         # USB hot-plug supervisor: 后台线程,设备掉线后按指数退避自动重连。
         # 主循环不直接重枚举,只通过 send_frame 失败时 UsbTransport.mark_closed()
@@ -233,7 +288,18 @@ class Daemon:
         event_type: 0=DOWN, 1=MOVE, 2=UP, 3=SWIPE_LEFT, 4=SWIPE_RIGHT, 5=LONG_PRESS
         """
         log.info("Touch: type=%d x=%d y=%d", event_type, x, y)
-        if event_type == TouchEvent.SWIPE_LEFT:
+        if event_type == TouchEvent.DOWN:
+            # Begin click candidate; cleared by MOVE so drags/swipes don't fire.
+            self._pending_click = (x, y)
+        elif event_type == TouchEvent.MOVE:
+            # Any finger motion means it wasn't a click.
+            self._pending_click = None
+        elif event_type == TouchEvent.UP:
+            if self._pending_click is not None:
+                cx, cy = self._pending_click
+                self._pending_click = None
+                self._dispatch_click(cx, cy)
+        elif event_type == TouchEvent.SWIPE_LEFT:
             self._next_page()
         elif event_type == TouchEvent.SWIPE_RIGHT:
             self._prev_page()
@@ -256,6 +322,62 @@ class Daemon:
         page = self._pages[self._current_page]
         # Pages may opt-in to long-press via on_touch(); base impl returns None.
         page.on_touch(TouchEvent.LONG_PRESS, x, y) if hasattr(page, 'on_touch') else None
+
+    def _dispatch_click(self, x: int, y: int) -> None:
+        """Fire the custom command at (x, y) on the current page.
+
+        The page's ``on_touch`` returns the matching ``command`` string
+        (or None for misses / non-CommandsPage pages). We launch it
+        inside a terminal emulator (so the user actually sees the command
+        run on their desktop) with the daemon-discovered session env,
+        detached into its own session group. Failures are logged but
+        never raised — a bad command can't kill the daemon.
+        """
+        page = self._pages[self._current_page]
+        cmd = page.on_touch(TouchEvent.DOWN, x, y) if hasattr(page, 'on_touch') else None
+        if not cmd or not cmd.strip():
+            return
+        # Defensive: ``gtk-launch`` without an arg prints "missing
+        # application name" — usually a stale YAML entry with a hand-
+        # edited ``command: gtk-launch`` line. Skip rather than spawn
+        # a terminal that only shows an error.
+        tokens = cmd.split()
+        if len(tokens) >= 1 and tokens[0] == "gtk-launch" and (
+            len(tokens) == 1 or not tokens[1].strip()
+        ):
+            log.warning(
+                "Custom command skipped: gtk-launch needs a desktop basename (cmd=%r). "
+                "Re-run `codebotd setup` to regenerate items, or fix command: in %s.",
+                cmd, "<config>",
+            )
+            return
+        log.info("Custom command fired on page %d: %r", self._current_page, cmd)
+        env = {**os.environ, **self._session_env}
+        try:
+            argv = self._build_terminal_argv(cmd) if self._terminal else None
+            if argv is None:
+                # No terminal emulator: fire-and-forget background run.
+                subprocess.Popen(cmd, shell=True, env=env, start_new_session=True)
+            else:
+                # Run inside a terminal window so output is visible.
+                subprocess.Popen(argv, env=env, start_new_session=True)
+        except (OSError, ValueError) as e:
+            log.warning("Custom command failed (%s): %r", e, cmd)
+
+    def _build_terminal_argv(self, cmd: str) -> list[str]:
+        """Compose the argv that opens a terminal and runs ``cmd`` inside it.
+
+        The terminal stays open after the command exits with a prompt to
+        press Enter, so the user can read any final output (errors, etc.)
+        before the window closes. The trailing ``read`` is read-line,
+        not read-stdin — bash keeps the window alive without grabbing
+        keyboard focus for other input.
+        """
+        terminal_path, prefix = self._terminal
+        # bash -c "<cmd>; echo ...; read" lets long-running apps
+        # (Chrome, …) finish launching before the prompt appears.
+        inner = f"{cmd}; echo; echo '[Enter to close this window]'; read"
+        return [terminal_path, *prefix, "bash", "-c", inner]
 
     def _enqueue_touch_from_sim(self, event_type: int, x: int, y: int) -> None:
         """Called from HTTP thread by SimServer. Push to queue; main loop drains."""

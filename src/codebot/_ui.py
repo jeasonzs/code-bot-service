@@ -227,6 +227,16 @@ def path(message: str, *, default: str = "") -> str:
     return str(_ask(questionary.path(message, default=default))).strip()
 
 
+def checkbox(message: str, choices: Sequence[str], *, default: Sequence[str] = ()) -> list[str]:
+    """Multi-select. Non-interactive returns ``default`` without importing questionary."""
+    if not INTERACTIVE:
+        return list(default)
+    import questionary
+
+    result = _ask(questionary.checkbox(message, choices=list(choices)))
+    return [str(c) for c in result]
+
+
 # ---- progress ----
 
 @contextmanager

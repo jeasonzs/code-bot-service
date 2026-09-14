@@ -56,6 +56,10 @@ DEFAULTS: dict[str, Any] = {
         "claude": {
             "enabled": False,              # flipped by `codebotd setup` phase 3
         },
+        "custom_commands": {
+            "enabled": False,              # flipped by `codebotd setup` phase 5
+            "items": [],                   # list of {name, icon, command}; daemon chunks by 2/page
+        },
     },
 }
 
