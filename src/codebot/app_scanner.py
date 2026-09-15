@@ -227,7 +227,7 @@ def _scan_windows() -> Iterable["AppEntry"]:
                 if candidate.is_file():
                     icon_path = str(candidate.resolve())
                     break
-            yield AppEntry(name=stem, icon_path=icon_path, command=stem)
+            yield AppEntry(name=stem, icon_path=icon_path, command=f'start "" "{stem}"')
 
 
 @dataclass

@@ -33,7 +33,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
+from typing import Callable
 
 
 log = logging.getLogger("codebot.session")
@@ -44,33 +46,98 @@ log = logging.getLogger("codebot.session")
 _GUI_KEYS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")
 
 
-# Terminal-emulator candidates: (binary name, arg prefix). ``x-terminal-emulator``
-# is the freedesktop standard wrapper that distros point at the user's
-# preferred terminal (set via ``update-alternatives``). The rest are
-# fallbacks per desktop environment.
-_TERMINAL_CANDIDATES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("x-terminal-emulator", ("-e",)),
-    ("gnome-terminal",      ("--",)),
-    ("konsole",             ("-e",)),
-    ("xfce4-terminal",      ("-e",)),
-    ("alacritty",           ("-e",)),
-    ("foot",                ("-e",)),
-    ("xterm",               ("-e",)),
+# (terminal_path, cmd) -> full argv (including the terminal binary itself).
+# Each platform family has its own quoting / "run-then-pause" idiom; the
+# builder captures all of it so the daemon side stays a one-liner.
+TerminalArgvBuilder = Callable[[str, str], list[str]]
+
+
+def _linux_xterm_family_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[path, -e, bash, -c, inner] — most Linux terminals (x-terminal-emulator, konsole, …)."""
+    inner = f"{cmd}; echo; echo '[Enter to close this window]'; read"
+    return [terminal_path, "-e", "bash", "-c", inner]
+
+
+def _linux_gnome_terminal_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[path, --, bash, -c, inner] — gnome-terminal uses ``--`` separator (consumes rest)."""
+    inner = f"{cmd}; echo; echo '[Enter to close this window]'; read"
+    return [terminal_path, "--", "bash", "-c", inner]
+
+
+def _applescript_escape(s: str) -> str:
+    """AppleScript string literal escaping: backslash + double-quote."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _osascript_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[osascript, -e, AppleScript] — Terminal.app ``do script`` opens new window.
+
+    Terminal.app itself runs in the user's GUI session, so ``inner``
+    inherits DISPLAY/PATH/etc. — the daemon doesn't need to inject env.
+    """
+    inner = f"{cmd}; echo; echo '[Enter to close this window]'; read"
+    script = f'tell application "Terminal" to do script "{_applescript_escape(inner)}"'
+    return [terminal_path, "-e", script]
+
+
+def _cmd_inner(cmd: str) -> str:
+    """cmd.exe inner: ``cmd & echo. & echo [Enter…] & pause``."""
+    return f'{cmd}& echo.& echo [Enter to close this window]& pause'
+
+
+def _powershell_inner(cmd: str) -> str:
+    """PowerShell inner: ``cmd ; "" ; "Press Enter…" ; Read-Host``."""
+    return f'{cmd}; ""; "Press Enter to close this window"; Read-Host'
+
+
+def _wt_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[wt, -d, ., cmd, /k, inner] — Windows Terminal opens new tab with cmd.exe, /k 保持窗口."""
+    return [terminal_path, "-d", ".", "cmd", "/k", _cmd_inner(cmd)]
+
+
+def _powershell_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[powershell, -NoExit, -Command, inner] — PowerShell 窗口跑完不退出."""
+    return [terminal_path, "-NoExit", "-Command", _powershell_inner(cmd)]
+
+
+def _cmd_argv(terminal_path: str, cmd: str) -> list[str]:
+    """[cmd, /k, inner] — fallback 老 cmd.exe."""
+    return [terminal_path, "/k", _cmd_inner(cmd)]
+
+
+# Terminal-emulator candidates: (binary name, builder_callable).
+# ``x-terminal-emulator`` is the freedesktop standard wrapper distros
+# point at the user's preferred terminal (``update-alternatives``); the
+# rest are fallbacks per desktop environment. macOS uses ``osascript``
+# to drive Terminal.app; Windows tries Windows Terminal → PowerShell →
+# cmd in that order.
+_TERMINAL_CANDIDATES: tuple[tuple[str, TerminalArgvBuilder], ...] = (
+    *([("osascript", _osascript_argv)] if sys.platform == "darwin" else ()),
+    *([("wt", _wt_argv), ("powershell", _powershell_argv), ("cmd", _cmd_argv)]
+      if sys.platform == "win32" else ()),
+    ("x-terminal-emulator", _linux_xterm_family_argv),
+    ("konsole",             _linux_xterm_family_argv),
+    ("xfce4-terminal",      _linux_xterm_family_argv),
+    ("alacritty",           _linux_xterm_family_argv),
+    ("foot",                _linux_xterm_family_argv),
+    ("xterm",               _linux_xterm_family_argv),
+    ("gnome-terminal",      _linux_gnome_terminal_argv),
 )
 
 
-def detect_terminal_emulator() -> tuple[str, tuple[str, ...]] | None:
+def detect_terminal_emulator() -> tuple[str, TerminalArgvBuilder] | None:
     """Find an installed terminal emulator.
 
-    Returns ``(absolute_path, argv_prefix)`` where ``argv_prefix`` is the
-    argument list (e.g. ``("-e",)``) that separates the terminal name
-    from the command-to-run, or ``None`` if nothing is installed.
+    Returns ``(absolute_path, builder)`` where ``builder(terminal_path, cmd)``
+    returns the full argv (including the terminal binary itself) that runs
+    ``cmd`` inside a visible terminal window, or ``None`` if nothing is
+    installed.
     """
-    for name, prefix in _TERMINAL_CANDIDATES:
+    for name, builder in _TERMINAL_CANDIDATES:
         path = shutil.which(name)
         if path:
-            log.info("terminal emulator: %s (prefix=%s)", path, prefix)
-            return path, prefix
+            log.info("terminal emulator: %s (via %s builder)", path, name)
+            return path, builder
     log.warning("no terminal emulator found; custom commands will run without a window")
     return None
 
@@ -104,13 +171,26 @@ _SESSION_MANAGER_MARKERS = (
 def discover_session_env() -> dict[str, str]:
     """Return a dict of GUI session env keys for the current user, or {}.
 
-    Lookup order:
+    Lookup order (Linux only — see platform notes below):
 
       1. ``/proc`` scan for a session-manager process owned by the
          daemon's uid — its environ is the canonical source.
       2. ``$XDG_RUNTIME_DIR`` (dbus bus + wayland socket) and
          ``/tmp/.X11-unix/X<n>`` (DISPLAY) as best-effort fallbacks.
+
+    On macOS / Windows, custom commands run inside the user's already-
+    GUI-session-attached process (Terminal.app / cmd.exe) so the env is
+    inherited automatically — nothing to inject from here. Returns ``{}``
+    so the caller's ``{**os.environ, **session_env}`` merge is a no-op.
     """
+    if sys.platform != "linux":
+        log.info("no env discovery on %s; relying on user session", sys.platform)
+        return {}
+    return _discover_session_env_linux()
+
+
+def _discover_session_env_linux() -> dict[str, str]:
+    """Linux implementation of :func:`discover_session_env`."""
     uid = os.getuid()
     found = _from_session_manager_proc(uid)
     _from_xdg_runtime(found)

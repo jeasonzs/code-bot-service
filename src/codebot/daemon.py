@@ -185,7 +185,8 @@ class Daemon:
         # Terminal emulator for wrapping custom commands so the user
         # actually sees the command run on their desktop. ``None`` means
         # no terminal was found; commands then fire in the background.
-        self._terminal: Optional[tuple[str, tuple[str, ...]]] = detect_terminal_emulator()
+        from .session import TerminalArgvBuilder
+        self._terminal: Optional[tuple[str, TerminalArgvBuilder]] = detect_terminal_emulator()
 
         # USB hot-plug supervisor: 后台线程,设备掉线后按指数退避自动重连。
         # 主循环不直接重枚举,只通过 send_frame 失败时 UsbTransport.mark_closed()
@@ -367,17 +368,15 @@ class Daemon:
     def _build_terminal_argv(self, cmd: str) -> list[str]:
         """Compose the argv that opens a terminal and runs ``cmd`` inside it.
 
-        The terminal stays open after the command exits with a prompt to
-        press Enter, so the user can read any final output (errors, etc.)
-        before the window closes. The trailing ``read`` is read-line,
-        not read-stdin — bash keeps the window alive without grabbing
-        keyboard focus for other input.
+        Delegates to the platform-specific builder captured at startup
+        (see ``session.detect_terminal_emulator``): Linux terminals
+        use ``bash -c``; macOS bridges via osascript/Terminal.app;
+        Windows uses cmd /k or PowerShell -NoExit. The terminal stays
+        open after the command exits with a prompt to press Enter so
+        the user can read final output before the window closes.
         """
-        terminal_path, prefix = self._terminal
-        # bash -c "<cmd>; echo ...; read" lets long-running apps
-        # (Chrome, …) finish launching before the prompt appears.
-        inner = f"{cmd}; echo; echo '[Enter to close this window]'; read"
-        return [terminal_path, *prefix, "bash", "-c", inner]
+        terminal_path, builder = self._terminal
+        return builder(terminal_path, cmd)
 
     def _enqueue_touch_from_sim(self, event_type: int, x: int, y: int) -> None:
         """Called from HTTP thread by SimServer. Push to queue; main loop drains."""

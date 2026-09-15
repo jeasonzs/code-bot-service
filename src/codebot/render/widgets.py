@@ -111,22 +111,28 @@ def get_font(name: str = "default", size: int = 12) -> ImageFont.ImageFont:
             log.warning("DSEG7 font lookup failed (%s); using default font", e)
             candidates = []
     elif name == "cjk":
-        # CJK font for date / Chinese labels. TTC index is ignored by
-        # Pillow's getbbox path; PIL picks the first face that has the
-        # requested glyph, so the .ttc file works as-is on Linux/macOS.
+        # CJK font for date / Chinese labels. Bold variants are tried
+        # first so titles / labels render heavier; Regular is the
+        # fallback if no Bold face is installed on this platform.
+        # (NotoSansCJK is single-file Regular+Bold on Linux; macOS
+        # PingFang.ttc and Windows msyh(.bd) ship separately.)
         candidates = [
             # Linux 系统级
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/arphic/uming.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             # Linux 用户级
+            str(Path.home() / ".local/share/fonts/NotoSansCJK-Bold.ttc"),
             str(Path.home() / ".local/share/fonts/NotoSansCJK-Regular.ttc"),
-            # macOS
+            # macOS — PingFang.ttc face 1 = Bold
+            ("/System/Library/Fonts/PingFang.ttc", 1),
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            # Windows
+            # Windows — separate Bold file (msyhbd), Regular fallback
+            "C:\\Windows\\Fonts\\msyhbd.ttc",
             "C:\\Windows\\Fonts\\msyh.ttc",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\msyhbd.ttc"),
             os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Windows\Fonts\msyh.ttc"),
         ]
     else:

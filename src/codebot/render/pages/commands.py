@@ -102,7 +102,7 @@ class CommandsPage(BasePage):
         else:
             self._draw_placeholder(canvas, ix, icon_y, icon_size)
 
-        font = get_font("default", 11)
+        font = get_font("cjk", 12)
         rgb = (VSCodeDark.FG.r, VSCodeDark.FG.g, VSCodeDark.FG.b)
         draw_text_centered(canvas, item.name, cx, title_y, font, Color(*rgb))
 
