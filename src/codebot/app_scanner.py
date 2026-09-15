@@ -23,6 +23,7 @@ import configparser
 import os
 import plistlib
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -170,6 +171,24 @@ def _read_info_plist(bundle: Path) -> Optional[dict]:
         return None
 
 
+_MDLS_DISPLAY_NAME_RE = re.compile(r'^kMDItemDisplayName\s*=\s*"(.+)"\s*$', re.MULTILINE)
+
+
+def _mdls_display_name(bundle: Path) -> Optional[str]:
+    """Spotlight owns the canonical user-facing app name; CFBundleName
+    often diverges ("Find My" vs CFBundleName="FindMy")."""
+    try:
+        out = subprocess.check_output(
+            ["mdls", "-name", "kMDItemDisplayName", str(bundle)],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    m = _MDLS_DISPLAY_NAME_RE.search(out.decode("utf-8", errors="replace"))
+    return m.group(1) if m else None
+
+
 def _scan_macos() -> Iterable["AppEntry"]:
     for d in _MAC_APP_DIRS:
         root = Path(d)
@@ -185,7 +204,12 @@ def _scan_macos() -> Iterable["AppEntry"]:
                 continue
             if info.get("LSUIElement") is True:
                 continue
-            name = info.get("CFBundleName") or bundle.stem
+            # Spotlight > CFBundleName > folder stem.
+            name = (
+                _mdls_display_name(bundle)
+                or info.get("CFBundleName")
+                or bundle.stem
+            )
             icon_file = info.get("CFBundleIconFile")
             icon_path = ""
             if icon_file:
@@ -195,10 +219,13 @@ def _scan_macos() -> Iterable["AppEntry"]:
                     candidate = bundle / "Contents" / "Resources" / f"{icon_file}.icns"
                 if candidate.is_file():
                     icon_path = str(candidate.resolve())
+            # Command targets the bundle by folder name (no .app suffix),
+            # so a user-renamed bundle still launches even when its
+            # display name diverges from its folder name.
             yield AppEntry(
                 name=name,
                 icon_path=icon_path,
-                command=f'open -a "{name}"',
+                command=f'open -a "{bundle.stem}"',
             )
 
 

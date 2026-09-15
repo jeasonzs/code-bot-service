@@ -46,9 +46,8 @@ log = logging.getLogger("codebot.session")
 _GUI_KEYS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")
 
 
-# (terminal_path, cmd) -> full argv (including the terminal binary itself).
-# Each platform family has its own quoting / "run-then-pause" idiom; the
-# builder captures all of it so the daemon side stays a one-liner.
+# (terminal_path, cmd) -> full argv. Each platform has its own
+# quoting / run-then-pause idiom, captured per-builder.
 TerminalArgvBuilder = Callable[[str, str], list[str]]
 
 
@@ -105,12 +104,8 @@ def _cmd_argv(terminal_path: str, cmd: str) -> list[str]:
     return [terminal_path, "/k", _cmd_inner(cmd)]
 
 
-# Terminal-emulator candidates: (binary name, builder_callable).
-# ``x-terminal-emulator`` is the freedesktop standard wrapper distros
-# point at the user's preferred terminal (``update-alternatives``); the
-# rest are fallbacks per desktop environment. macOS uses ``osascript``
-# to drive Terminal.app; Windows tries Windows Terminal → PowerShell →
-# cmd in that order.
+# (binary, builder_callable); ``x-terminal-emulator`` is the freedesktop
+# wrapper distros point at the user's preferred terminal.
 _TERMINAL_CANDIDATES: tuple[tuple[str, TerminalArgvBuilder], ...] = (
     *([("osascript", _osascript_argv)] if sys.platform == "darwin" else ()),
     *([("wt", _wt_argv), ("powershell", _powershell_argv), ("cmd", _cmd_argv)]
