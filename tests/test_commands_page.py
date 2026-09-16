@@ -94,8 +94,8 @@ class TestCommandsPage(unittest.TestCase):
         ])
         canvas = Canvas()
         page.render(canvas)
-        # Solo icon now lives in the left slot: top-left = (80-48, 28) = (32, 28).
-        self.assertEqual(canvas.image.getpixel((32, 28)), (60, 60, 60))
+        # Solo icon now lives in the left slot: top-left = (80-40, 35) = (40, 35).
+        self.assertEqual(canvas.image.getpixel((40, 35)), (60, 60, 60))
 
 
 if __name__ == "__main__":
