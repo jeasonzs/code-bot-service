@@ -1,9 +1,11 @@
 """Claude Code page: live state from ~/.code-bot/claude-state.json.
 
-Layout (mirrors SystemPage, full-screen 2x2 + footer):
-  y=0..72    STATUS (active/idle/stopped/error) | CONTEXT (used % + bar)
-  y=72..144  IN (ctx in)                        | OUT (ctx out)
-  y=144..172 >_  Model  cwd/basename  $cost     (footer)
+Layout (mirrors SystemPage, full-screen 2x2 + top header):
+  y=0..28    >_ <title>           <model>  <cwd>  <$cost>  (HeaderView)
+  ── divider at y=28 ──
+  y=28..100  STATUS (active/idle/stopped/error) | CONTEXT (used % + bar)
+  ── divider at y=100 ──
+  y=100..172 IN (ctx in)                        | OUT (ctx out)
 
 Data source: scripts/claude-statusline.py writes the state file from
 Claude Code's statusline payload. Statusline has no event semantics
@@ -24,18 +26,18 @@ from PIL import ImageDraw
 
 from ...collectors.claude import ClaudeCollector, ClaudeSnapshot
 from ..canvas import Canvas
-from ..theme import VSCodeDark, SCREEN_W
-from ..views.footer_view import FooterView
+from ..theme import HEADER_H, VSCodeDark, SCREEN_W
+from ..views.header_view import HeaderView
 from ..views.tile_view import TileView
 from ..views.warning_banner import WarningBannerView
 from .base import BasePage
 
 
-# Layout constants - identical to SystemPage (2x2 dashboard, full screen).
-ROW1_Y = 0
-ROW2_Y = 72
+# Layout constants - identical to SystemPage (2x2 dashboard below header).
+# HEADER_H (28) + 2 × ROW_H (72) = 172 fills the screen exactly.
 ROW_H = 72
-FOOTER_Y = 144
+ROW1_Y = HEADER_H
+ROW2_Y = HEADER_H + ROW_H
 
 CELL_W = SCREEN_W // 2
 
@@ -147,12 +149,12 @@ def _cwd_basename(cwd: str) -> str:
 
 
 def _footer_text(snap: ClaudeSnapshot) -> str:
-    """Compose the footer line: model + cwd/basename (+ cost if room).
+    """Compose the header subtitle line: model + cwd/basename (+ cost).
 
-    Statusline doesn't give us per-event info, so we surface the most
-    glanceable session metadata instead. The footer fits ~28 chars
-    after the `>_` prompt, so we drop cost when model + cwd already
-    fills the budget (cost is the least-glanceable of the three).
+    Reused from the previous footer implementation. The header subtitle
+    has more horizontal room than the old 28-char footer cap, but we
+    keep the same budget so the line still reads as a glanceable
+    one-liner instead of a paragraph.
     """
     model = snap.model_display.strip()
     cwd = _cwd_basename(snap.cwd)
@@ -181,45 +183,67 @@ def _footer_text(snap: ClaudeSnapshot) -> str:
 
 
 class ClaudePage(BasePage):
-    """Real-time Claude Code dashboard (2x2 + footer)."""
+    """Real-time Claude Code dashboard (2x2 + top header)."""
 
-    title = ""        # match SystemPage: empty title, page renders its own chrome
+    title = ""        # class-level fallback; daemon stamps entry name
     skip_chrome = True
 
-    def __init__(self, collector: Optional[ClaudeCollector] = None) -> None:
+    def __init__(
+        self,
+        collector: Optional[ClaudeCollector] = None,
+        *,
+        title: str = "Claude",
+    ) -> None:
         self._collector = collector
+        self._title = title
 
     def render(self, canvas: Canvas) -> None:
         snap = self._collector.snapshot() if self._collector else None
         canvas.fill(VSCodeDark.BG)
 
         if snap is None:
+            self._draw_header(canvas, None)
             return
 
+        self._draw_header(canvas, snap)
         self._draw_dividers(canvas)
         self._draw_tiles(canvas, snap)
-        self._draw_footer(canvas, snap)
         if snap.status == "error":
             self._draw_error_banner(canvas, snap)
 
     # ---- sections (mirror SystemPage) ----
 
+    def _draw_header(self, canvas: Canvas, snap: Optional[ClaudeSnapshot]) -> None:
+        subtitle = _footer_text(snap) if snap is not None else "—"
+        subtitle_color = (
+            _STATUS_COLOR.get(snap.status, VSCodeDark.FG_DIM)
+            if snap is not None
+            else VSCodeDark.FG_DIM
+        )
+        HeaderView(
+            title=self._title,
+            subtitle=subtitle,
+            subtitle_color=subtitle_color,
+        ).draw(canvas)
+
     @staticmethod
     def _draw_dividers(canvas: Canvas) -> None:
         d = ImageDraw.Draw(canvas.image)
         border = (VSCodeDark.BORDER.r, VSCodeDark.BORDER.g, VSCodeDark.BORDER.b)
+        # Header / body separator.
+        d.line(
+            [(0, HEADER_H), (SCREEN_W, HEADER_H)],
+            fill=border, width=1,
+        )
+        # Vertical line between left and right tiles.
         d.line(
             [(SCREEN_W // 2, ROW1_Y), (SCREEN_W // 2, ROW2_Y + ROW_H)],
             fill=border, width=1,
         )
+        # Horizontal line between row 1 and row 2.
         d.line([(0, ROW2_Y), (SCREEN_W, ROW2_Y)], fill=border, width=1)
-        d.line(
-            [(0, ROW2_Y + ROW_H), (SCREEN_W, ROW2_Y + ROW_H)],
-            fill=border, width=1,
-        )
 
-    @staticmethod
-    def _draw_tiles(canvas: Canvas, snap: ClaudeSnapshot) -> None:
+    def _draw_tiles(self, canvas: Canvas, snap: ClaudeSnapshot) -> None:
         color = _STATUS_COLOR.get(snap.status, VSCodeDark.FG_DIM)
         # Map the 6-state enum to short LCD labels (idle / think / tool /
         # perm / stop / error). Full names stay in the collector's
@@ -297,18 +321,6 @@ class ClaudePage(BasePage):
             value_unit=_token_unit(snap.context_out),
             value_color=VSCodeDark.WARNING,
             value_font="digital",
-        ).draw(canvas)
-
-    @staticmethod
-    def _draw_footer(canvas: Canvas, snap: ClaudeSnapshot) -> None:
-        FooterView(
-            y=FOOTER_Y,
-            items=[
-                {
-                    "value": _footer_text(snap),
-                    "color": _STATUS_COLOR.get(snap.status, VSCodeDark.FG_DIM),
-                },
-            ],
         ).draw(canvas)
 
     @staticmethod

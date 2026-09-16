@@ -59,44 +59,43 @@ class _BuildPageError(Exception):
     skips the entry — the daemon keeps running with the rest."""
 
 
-def _page_title(entry: dict) -> str:
-    """Derive a per-entry LCD title.
+def _entry_display_name(entry: dict, *, seq_for_kind: int) -> str:
+    """Resolve the per-entry display name shown in the top Header.
 
-    Multi-instance pages get a host suffix so the user can tell apart
-    e.g. local vs ssh without reading the indicator. The title only
-    renders on pages that don't ``skip_chrome``; for the others it's
-    still useful as a debug label.
+    Priority: explicit ``entry["name"]`` (set during setup) > auto-derived
+    ``{type}-{seq:02d}`` > fallback ``kind or "Page"``. ``seq_for_kind`` is
+    1-based and counted per entry type, so two system pages yield
+    ``system-01`` / ``system-02`` regardless of github entries in between.
     """
+    explicit = entry.get("name")
+    if explicit:
+        return str(explicit)
     kind = entry.get("type")
-    if kind == "system":
-        if entry.get("target") == "ssh":
-            host = (entry.get("ssh_config") or {}).get("host") or "ssh"
-            return f"System {host}"
-        return "System"
-    if kind == "claude":
-        if entry.get("target") == "ssh":
-            host = (entry.get("ssh_config") or {}).get("host") or "ssh"
-            return f"Claude {host}"
-        return "Claude"
-    if kind == "github":
-        return entry.get("account") or "GitHub"
-    if kind == "custom_commands":
-        items = entry.get("items") or []
-        if items and isinstance(items[0], dict):
-            return items[0].get("name") or "Commands"
-        return "Commands"
-    return kind or "Page"
+    if kind:
+        return f"{kind}-{seq_for_kind:02d}"
+    return "Page"
 
 
-def _build_page_and_collector(entry: dict) -> tuple:
+def _system_host_label(entry: dict, target) -> str:
+    """Render the host label shown in the SystemPage header subtitle."""
+    if isinstance(target, LocalTarget):
+        return "localhost"
+    return (entry.get("ssh_config") or {}).get("host") or "ssh"
+
+
+def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
     """Build (page, collector) for one config entry.
 
     The collector is constructed here too — pages only know their
     abstract collector interface; the entry's ``target`` discriminator
     picks the Local vs Remote implementation. ``None`` collector means
     the page doesn't need one (ClockPage, CommandsPage).
+
+    ``default_name`` is the type-prefixed auto-name (``system-01`` etc.);
+    ``entry["name"]`` overrides it when present (see ``_entry_display_name``).
     """
     kind = entry.get("type")
+    display_name = entry.get("name") or default_name
     if kind == "github":
         token = (entry.get("token") or "").strip()
         # Empty token is OK when $GITHUB_TOKEN is set — the setup
@@ -108,8 +107,8 @@ def _build_page_and_collector(entry: dict) -> tuple:
             )
         gh = GithubCollector(refresh_interval=60.0, token=token)
         page = GithubPage(collector=gh, token=token,
-                          account=entry.get("account"))
-        page.title = _page_title(entry)
+                          account=entry.get("account"),
+                          title=display_name)
         return page, gh
     if kind == "system":
         target = parse_target(entry)
@@ -117,8 +116,11 @@ def _build_page_and_collector(entry: dict) -> tuple:
             col = LocalSystemCollector(hz=2.0)
         else:
             col = RemoteSystemCollector(target, hz=0.5)
-        page = SystemPage(collector=col)
-        page.title = _page_title(entry)
+        page = SystemPage(
+            collector=col,
+            title=display_name,
+            host_label=_system_host_label(entry, target),
+        )
         return page, col
     if kind == "claude":
         target = parse_target(entry)
@@ -142,8 +144,7 @@ def _build_page_and_collector(entry: dict) -> tuple:
                 hz=0.5,
                 stale_after_s=30.0,
             )
-        page = ClaudePage(collector=col)
-        page.title = _page_title(entry)
+        page = ClaudePage(collector=col, title=display_name)
         return page, col
     if kind == "custom_commands":
         items = [
@@ -158,7 +159,7 @@ def _build_page_and_collector(entry: dict) -> tuple:
         if not items:
             raise _BuildPageError("custom_commands entry has empty items")
         page = CommandsPage(items)
-        page.title = _page_title(entry)
+        page.title = display_name
         return page, None
     raise _BuildPageError(f"unknown page type {kind!r}")
 
@@ -172,17 +173,30 @@ def make_pages(config: Optional[Config] = None) -> tuple[list, list]:
     Returning only the entries we successfully built keeps the rest of
     the daemon free of per-page conditionals (indicator segment count,
     next/prev wrap, refresh loop all derive from ``len(self._pages)``).
+
+    Each entry's display name is resolved per-kind with a 1-based
+    sequence counter (see ``_entry_display_name``). The counter is
+    independent of YAML order across types — adding a github entry
+    between two system entries does NOT renumber the system pages.
     """
     if config is None:
         config = Config()
 
     pages: list = [ClockPage()]
     collectors: list = [None]
+    seq_per_kind: dict[str, int] = {}
     for entry in (config.get("pages") or []):
         if not isinstance(entry, dict):
             continue
+        kind = entry.get("type")
+        if not kind:
+            continue
+        seq_per_kind[kind] = seq_per_kind.get(kind, 0) + 1
+        default_name = f"{kind}-{seq_per_kind[kind]:02d}"
         try:
-            page, col = _build_page_and_collector(entry)
+            page, col = _build_page_and_collector(
+                entry, default_name=default_name,
+            )
         except _BuildPageError as e:
             log.warning("skipping page entry %r: %s", entry, e)
             continue

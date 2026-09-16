@@ -79,8 +79,15 @@ class VSCodeDark:
 # Display dimensions
 SCREEN_W = 320
 SCREEN_H = 172
+# INDICATOR_H/TITLE_H/HINT_H: apply to the daemon chrome used by
+# ShortcutsPage / OpenclawPage / HermesPage (not the new HEADER_H).
 INDICATOR_H = 4  # top indicator bar height
 TITLE_H = 20      # title area height
 HINT_H = 8        # bottom hint area height
 CONTENT_Y = INDICATOR_H + TITLE_H  # = 24
 CONTENT_H = SCREEN_H - CONTENT_Y - HINT_H  # = 140
+# Top header row height for SystemPage / GithubPage / ClaudePage.
+# Absorbs the 8px that used to be the footer blank so the header has
+# enough vertical room for a 16pt title + 12pt subtitle without crowding.
+# 28 + 72 + 72 = 172 (full screen).
+HEADER_H = 28

@@ -1,11 +1,13 @@
 """GitHub page: 2x2 dashboard of GitHub stats (Stars / Streak / Commits /
-PRs) plus a footer showing the latest CI status.
+PRs) plus a top header showing the latest event.
 
-Layout (mirrors SystemPage, full-screen 2x2 grid):
+Layout (mirrors SystemPage, full-screen 2x2 grid + HeaderView):
 
-    y=0-72    STARS  (k)         | STREAK (Days)        [always "—" for now]
-    y=72-144  COMMITS (Today)    | PRS (Open)
-    y=148-172  >_  [status]  ok/fail/run/wait #N <workflow>
+    y=0..28    >_ <title>            <verb> <object> <age ago>
+    ── divider at y=28 ──
+    y=28..100  STARS  (k)            | FOLLOW
+    ── divider at y=100 ──
+    y=100..172 COMMITS (Today)       | PRS (Open)
 
 Renders ``—`` when GITHUB_TOKEN is missing or any field fails to fetch.
 The page reads data from a shared ``GithubCollector`` (background
@@ -21,18 +23,18 @@ from PIL import ImageDraw
 
 from ...collectors.github import GithubCollector, GithubSnapshot
 from ..canvas import Canvas
-from ..theme import VSCodeDark, SCREEN_W
-from ..views.footer_view import FooterView
+from ..theme import HEADER_H, Color, VSCodeDark, SCREEN_W
+from ..views.header_view import HeaderView
 from ..views.tile_view import TileView
 from ..views.warning_banner import WarningBannerView
 from .base import BasePage
 
 
-# Layout constants: same 2x2 grid geometry as SystemPage.
-ROW1_Y = 0
-ROW2_Y = 72
+# Layout constants: same 2x2 grid geometry as SystemPage. HEADER_H (28)
+# + 2 × ROW_H (72) = 172 fills the screen exactly.
 ROW_H = 72
-FOOTER_Y = 144
+ROW1_Y = HEADER_H
+ROW2_Y = HEADER_H + ROW_H
 
 CELL_W = SCREEN_W // 2  # 160
 
@@ -64,9 +66,9 @@ def _fmt_int(n: Optional[int]) -> str:
     return "0" if n is None else str(n)
 
 
-# ---- Event footer ----
+# ---- Event header subtitle ----
 
-# Map GitHub event type → short verb shown in the footer.
+# Map GitHub event type → short verb shown in the header subtitle.
 _EVENT_VERB = {
     "PushEvent":         "Push",
     "CreateEvent":       "Create",
@@ -102,14 +104,15 @@ def _fmt_age(ts: Optional[float]) -> str:
     return f"{s // 86400} d ago"
 
 
-def _event_footer_item(snap: Optional[GithubSnapshot]) -> dict:
-    """Build a FooterView item dict for the user's latest GitHub event.
+def _event_subtitle(snap: Optional[GithubSnapshot]) -> tuple[str, Color]:
+    """Build the header subtitle for the user's latest GitHub event.
 
-    Renders as ``Push main 2 min ago`` etc. — verb (colored by type) +
-    object (branch / title / etc.) + relative age.
+    Returns ``(text, color)`` where text is ``"Push main 2 min ago"``
+    etc. — verb (colored by type) + object (branch / title / etc.) +
+    relative age.
     """
     if snap is None or snap.latest_event_type is None:
-        return {"icon": "context", "value": "—", "color": VSCodeDark.FG_DIM}
+        return ("—", VSCodeDark.FG_DIM)
 
     verb = _EVENT_VERB.get(snap.latest_event_type, _DEFAULT_EVENT_VERB)
     obj = snap.latest_event_object or "—"
@@ -127,7 +130,7 @@ def _event_footer_item(snap: Optional[GithubSnapshot]) -> dict:
         "ReleaseEvent":     VSCodeDark.WARNING,
     }.get(snap.latest_event_type, VSCodeDark.FG_DIM)
 
-    return {"icon": "context", "value": f"{verb} {obj} {age}", "color": color}
+    return (f"{verb} {obj} {age}", color)
 
 
 # ---- Warning banner ----
@@ -155,19 +158,23 @@ _WARNING_BY_STATUS = {
 class GithubPage(BasePage):
     """GitHub stats dashboard. Shares a GithubCollector with the daemon."""
 
+    # Class-level title is a fallback only; the daemon stamps the
+    # per-entry display name at construction. HeaderView uses self._title.
     title = "GitHub"
     # Skip the daemon chrome (top page-indicator bar + title). The page
     # fills the entire screen, matching SystemPage's layout.
     skip_chrome = True
 
     def __init__(self, collector: Optional[GithubCollector] = None, *,
-                 token: str = "", account: Optional[str] = None) -> None:
+                 token: str = "", account: Optional[str] = None,
+                 title: str = "GitHub") -> None:
         self._collector = collector
         # Stash the per-page token + display account so make_pages() /
         # future pages can introspect them; the collector also keeps
         # the token (used in API requests).
         self._token = token
         self._account = account
+        self._title = title
         # Track the last snap we printed so the daemon log doesn't
         # spam once per render frame. None means "haven't printed yet".
         self._last_snap_dump: Optional[tuple] = None
@@ -177,9 +184,9 @@ class GithubPage(BasePage):
         self._dump_snap(snap)
         canvas.fill(VSCodeDark.BG)
 
+        self._draw_header(canvas, snap)
         self._draw_dividers(canvas)
         self._draw_tiles(canvas, snap)
-        self._draw_footer(canvas, snap)
         # Warning overlay must be drawn LAST so it sits on top of the
         # tile grid. We keep the grid visible underneath so the user
         # can see *which* fields are unpopulated; the banner just calls
@@ -208,20 +215,29 @@ class GithubPage(BasePage):
 
     # ---- Sections ----
 
+    def _draw_header(self, canvas: Canvas, snap: Optional[GithubSnapshot]) -> None:
+        subtitle, color = _event_subtitle(snap)
+        HeaderView(
+            title=self._title, subtitle=subtitle, subtitle_color=color,
+        ).draw(canvas)
+
     @staticmethod
     def _draw_dividers(canvas: Canvas) -> None:
         d = ImageDraw.Draw(canvas.image)
         border = (VSCodeDark.BORDER.r, VSCodeDark.BORDER.g, VSCodeDark.BORDER.b)
+        # Header / body separator.
+        d.line(
+            [(0, HEADER_H), (SCREEN_W, HEADER_H)],
+            fill=border, width=1,
+        )
+        # Vertical line between left and right tiles.
         d.line(
             [(SCREEN_W // 2, ROW1_Y), (SCREEN_W // 2, ROW2_Y + ROW_H)],
             fill=border, width=1,
         )
+        # Horizontal line between row 1 and row 2.
         d.line(
             [(0, ROW2_Y), (SCREEN_W, ROW2_Y)],
-            fill=border, width=1,
-        )
-        d.line(
-            [(0, ROW2_Y + ROW_H), (SCREEN_W, ROW2_Y + ROW_H)],
             fill=border, width=1,
         )
 
@@ -261,13 +277,6 @@ class GithubPage(BasePage):
             title="PR", title_color=VSCodeDark.SYN_FUNC,
             value_digits=_fmt_int(snap.open_prs if snap else None),
             value_unit="Open",
-        ).draw(canvas)
-
-    @staticmethod
-    def _draw_footer(canvas: Canvas, snap: Optional[GithubSnapshot]) -> None:
-        FooterView(
-            y=FOOTER_Y,
-            items=[_event_footer_item(snap)],
         ).draw(canvas)
 
     @staticmethod
