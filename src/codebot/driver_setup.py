@@ -1,6 +1,6 @@
 """Per-platform USB driver / permission installer for Code Bot.
 
-Invoked indirectly by ``codebotd setup`` (phase 2/4). Three branches:
+Invoked indirectly by ``codebotd setup`` (phase 2/7). Three branches:
 
   Linux    — copy udev/99-codebot.rules to /etc/udev/rules.d/ (needs sudo) or
               ~/.config/udev/rules.d/ (no sudo, user-level); reload udev;

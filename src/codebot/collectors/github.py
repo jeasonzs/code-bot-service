@@ -3,8 +3,9 @@
 Pulls data from api.github.com using a personal access token. Token
 lookup order (first match wins):
 
-  1. ``$GITHUB_TOKEN`` environment variable (12-factor / CI override)
-  2. ``Config`` (defaults to ``~/.code_bot/config.yml``)
+  1. ``token`` kwarg passed by the daemon (per-page token from
+     ``pages: [{type: github, token: ...}]``).
+  2. ``$GITHUB_TOKEN`` environment variable (12-factor / CI override).
 
 Designed to run as a background thread (one full refresh every
 ``refresh_interval`` seconds) and degrade gracefully when no token is
@@ -111,22 +112,18 @@ class GithubCollector:
     """Background thread that refreshes GitHub stats every ``refresh_interval``."""
 
     def __init__(self, refresh_interval: float = 60.0,
-                 config: Optional["Config"] = None) -> None:
+                 *, token: str = "") -> None:
         self.refresh_interval = refresh_interval
         self._lock = threading.Lock()
         self._latest: GithubSnapshot = _empty_snapshot()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # Token resolution: env > config file > empty.
-        if config is None:
-            from ..config import Config
-            config = Config()
+        # Token resolution: explicit kwarg > $GITHUB_TOKEN env > empty.
+        # The daemon passes the per-page token from the YAML entry; env
+        # is the fallback for shell-driven dev runs.
         env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-        cfg_token = config.get("pages", "github", "token") or ""
-        self._token = env_token or cfg_token
-        if not env_token and cfg_token:
-            log.info("Loaded GitHub token from %s", config.path)
+        self._token = (token or "").strip() or env_token
 
         # If no token is configured, mark the initial snapshot so the
         # page can render a Warning immediately (instead of waiting for
@@ -139,7 +136,7 @@ class GithubCollector:
                 latest_event_repo=None, latest_event_ts=None,
                 ts=0.0,
                 token_status="no_token",
-                token_error="Set GITHUB_TOKEN env or pages.github.token in ~/.code_bot/config.yml",
+                token_error="Set $GITHUB_TOKEN env or add a github entry to ~/.code_bot/config.yml pages:",
             )
 
     @property

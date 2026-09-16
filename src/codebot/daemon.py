@@ -33,10 +33,13 @@ from .render.pages.claude import ClaudePage
 from .render.pages.placeholders import OpenclawPage, HermesPage
 from .render.pages.shortcuts import ShortcutsPage
 from .render.pages.commands import CommandsPage, CommandItem
-from .collectors.system import SystemCollector
+from .collectors.system import LocalSystemCollector
+from .collectors.remote_system import RemoteSystemCollector
 from .collectors.github import GithubCollector
-from .collectors.claude import ClaudeCollector
-from .config import Config, page_enabled
+from .collectors.claude import LocalClaudeCollector
+from .collectors.remote_claude import RemoteClaudeCollector
+from .config import Config
+from .ssh import LocalTarget, SshTarget, parse_target
 
 
 log = logging.getLogger("codebot")
@@ -45,81 +48,147 @@ log = logging.getLogger("codebot")
 # ==============================================================
 # Page registry (order matches the 7-segment indicator)
 # ==============================================================
-# Pages whose visibility is config-gated, mapped to their key under the
-# `pages:` section of config.yml. Anything not listed here is always
-# shown — Clock and System need no external configuration.
-_CONFIG_GATED_PAGES: dict[type, str] = {
-    GithubPage: "github",
-    ClaudePage: "claude",
-    CommandsPage: "custom_commands",
-}
+# ``pages`` is an ordered array of typed entries; each entry's presence
+# in the array = enabled (no separate ``enabled`` flag). Order in YAML
+# = order on the LCD. Page types: github / system / claude /
+# custom_commands. ``system`` and ``claude`` carry a ``target``
+# discriminator (``local`` / ``ssh``); ``github`` is per-account.
+class _BuildPageError(Exception):
+    """Raised by :func:`_build_page_and_collector` for entries we can't
+    honour (missing token, unknown type, etc.). The caller logs and
+    skips the entry — the daemon keeps running with the rest."""
 
-_COMMANDS_PER_PAGE = 2
 
+def _page_title(entry: dict) -> str:
+    """Derive a per-entry LCD title.
 
-def _build_commands_pages(config: Config) -> list:
-    """Chunk ``pages.custom_commands.items`` into 2-per-page slices.
-
-    Each chunk becomes a :class:`CommandsPage` instance. Empty item list
-    produces an empty list (no CommandsPage added to the page registry).
+    Multi-instance pages get a host suffix so the user can tell apart
+    e.g. local vs ssh without reading the indicator. The title only
+    renders on pages that don't ``skip_chrome``; for the others it's
+    still useful as a debug label.
     """
-    raw_items = config.get("pages", "custom_commands", "items", default=[]) or []
-    items = [
-        CommandItem(
-            name=str(entry.get("name", "")),
-            icon_path=str(entry.get("icon", "")),
-            command=str(entry.get("command", "")),
-        )
-        for entry in raw_items
-        if isinstance(entry, dict)
-    ]
-    if not items:
-        return []
-    pages: list = []
-    for i in range(0, len(items), _COMMANDS_PER_PAGE):
-        chunk = items[i:i + _COMMANDS_PER_PAGE]
-        if chunk:
-            pages.append(CommandsPage(chunk))
-    return pages
+    kind = entry.get("type")
+    if kind == "system":
+        if entry.get("target") == "ssh":
+            host = (entry.get("ssh_config") or {}).get("host") or "ssh"
+            return f"System {host}"
+        return "System"
+    if kind == "claude":
+        if entry.get("target") == "ssh":
+            host = (entry.get("ssh_config") or {}).get("host") or "ssh"
+            return f"Claude {host}"
+        return "Claude"
+    if kind == "github":
+        return entry.get("account") or "GitHub"
+    if kind == "custom_commands":
+        items = entry.get("items") or []
+        if items and isinstance(items[0], dict):
+            return items[0].get("name") or "Commands"
+        return "Commands"
+    return kind or "Page"
 
 
-def make_pages(config: Optional[Config] = None) -> list:
-    """Build the page list, dropping pages disabled in config.
+def _build_page_and_collector(entry: dict) -> tuple:
+    """Build (page, collector) for one config entry.
 
-    Collectors are wired later in ``Daemon.__init__`` (constructed with
-    ``None`` here). Returning only the *enabled* pages keeps the rest of
-    the daemon free of per-page conditionals: the indicator segment
-    count, the next/prev modulo wrap and the refresh loops all derive
-    from ``len(self._pages)``.
+    The collector is constructed here too — pages only know their
+    abstract collector interface; the entry's ``target`` discriminator
+    picks the Local vs Remote implementation. ``None`` collector means
+    the page doesn't need one (ClockPage, CommandsPage).
+    """
+    kind = entry.get("type")
+    if kind == "github":
+        token = (entry.get("token") or "").strip()
+        # Empty token is OK when $GITHUB_TOKEN is set — the setup
+        # phase writes an empty entry as a marker so the page is
+        # built, and the collector picks up env at runtime.
+        if not token and not (os.environ.get("GITHUB_TOKEN") or "").strip():
+            raise _BuildPageError(
+                "github entry missing 'token' (and $GITHUB_TOKEN is not set)"
+            )
+        gh = GithubCollector(refresh_interval=60.0, token=token)
+        page = GithubPage(collector=gh, token=token,
+                          account=entry.get("account"))
+        page.title = _page_title(entry)
+        return page, gh
+    if kind == "system":
+        target = parse_target(entry)
+        if isinstance(target, LocalTarget):
+            col = LocalSystemCollector(hz=2.0)
+        else:
+            col = RemoteSystemCollector(target, hz=0.5)
+        page = SystemPage(collector=col)
+        page.title = _page_title(entry)
+        return page, col
+    if kind == "claude":
+        target = parse_target(entry)
+        if isinstance(target, LocalTarget):
+            sp = entry.get("state_path")
+            col = LocalClaudeCollector(
+                hz=4.0,
+                state_path=Path(sp) if sp else None,
+                stale_after_s=30.0,
+            )
+        else:
+            sp = (entry.get("state_path")
+                  or entry.get("remote_state_path")
+                  or "~/.code-bot/claude-state.json")
+            sp2 = (entry.get("status_path")
+                   or "~/.code-bot/claude-status.json")
+            col = RemoteClaudeCollector(
+                target,
+                state_path=sp,
+                status_path=sp2,
+                hz=0.5,
+                stale_after_s=30.0,
+            )
+        page = ClaudePage(collector=col)
+        page.title = _page_title(entry)
+        return page, col
+    if kind == "custom_commands":
+        items = [
+            CommandItem(
+                name=str(i.get("name", "")),
+                icon_path=str(i.get("icon", "")),
+                command=str(i.get("command", "")),
+            )
+            for i in (entry.get("items") or [])
+            if isinstance(i, dict)
+        ]
+        if not items:
+            raise _BuildPageError("custom_commands entry has empty items")
+        page = CommandsPage(items)
+        page.title = _page_title(entry)
+        return page, None
+    raise _BuildPageError(f"unknown page type {kind!r}")
+
+
+def make_pages(config: Optional[Config] = None) -> tuple[list, list]:
+    """Build (pages, collectors) from ``config.pages``.
+
+    Order: ``ClockPage`` first (always on), then entries in YAML order.
+    Collectors are wired here so the daemon doesn't need to know which
+    entry maps to which page — it just iterates the parallel list.
+    Returning only the entries we successfully built keeps the rest of
+    the daemon free of per-page conditionals (indicator segment count,
+    next/prev wrap, refresh loop all derive from ``len(self._pages)``).
     """
     if config is None:
         config = Config()
 
-    pages = []
-    for page in (ClockPage(), SystemPage(collector=None),
-                 GithubPage(collector=None), ClaudePage(collector=None)):
-        key = _CONFIG_GATED_PAGES.get(type(page))
-        if key is not None:
-            page.enabled = page_enabled(config, key)
-            if not page.enabled:
-                log.info(
-                    "Page %r hidden: set pages.%s.enabled: true in %s "
-                    "(or re-run `codebotd setup`) to show it",
-                    page.title, key, config.path,
-                )
-                continue
+    pages: list = [ClockPage()]
+    collectors: list = [None]
+    for entry in (config.get("pages") or []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            page, col = _build_page_and_collector(entry)
+        except _BuildPageError as e:
+            log.warning("skipping page entry %r: %s", entry, e)
+            continue
         pages.append(page)
-
-    if page_enabled(config, "custom_commands"):
-        cmd_pages = _build_commands_pages(config)
-        if cmd_pages:
-            pages.extend(cmd_pages)
-        else:
-            log.info(
-                "Custom Commands hidden: pages.custom_commands.items is empty; "
-                "run `codebotd setup` (phase 5) to populate it"
-            )
-    return pages
+        collectors.append(col)
+    return pages, collectors
 
 
 # ==============================================================
@@ -141,31 +210,9 @@ class Daemon:
         # the page registry: page visibility comes from it. The
         # collectors below share the same instance.
         self._config = Config()
-        self._pages = make_pages(self._config)
+        self._pages, self._collectors = make_pages(self._config)
         # 启动后默认显示第一页 (ClockPage)
         self._current_page = 0
-        self._sys_collector = SystemCollector(hz=2.0)
-        # GitHub stats refresh every 60s (well under the 5000 req/h limit
-        # of a token-authenticated user). If GITHUB_TOKEN is unset the
-        # collector simply never starts and the page shows "—".
-        self._gh_collector = GithubCollector(refresh_interval=60.0, config=self._config)
-        # Claude Code state file: 4 Hz mtime poll, default path
-        # ~/.code-bot/claude-state.json (overridable for tests via
-        # state_path=). 30 s stale -> status flips to "stopped".
-        self._claude_collector = ClaudeCollector(
-            hz=4.0,
-            state_path=Path.home() / ".code-bot" / "claude-state.json",
-            stale_after_s=30.0,
-        )
-        # Wire the shared collectors into their pages (constructed with
-        # ``None`` placeholders above).
-        for p in self._pages:
-            if isinstance(p, SystemPage):
-                p._collector = self._sys_collector
-            elif isinstance(p, GithubPage):
-                p._collector = self._gh_collector
-            elif isinstance(p, ClaudePage):
-                p._collector = self._claude_collector
         # 实验开关: True = 跳过 find_dirty_rects, 直接发全幅; 用于 A/B 验证左右抖动来源
         self._force_full_flush = True
 
@@ -235,15 +282,6 @@ class Daemon:
             if attempt < 2:
                 time.sleep(0.5)
         return False
-
-    def _has_page(self, cls: type) -> bool:
-        """True if a page of type ``cls`` is currently registered.
-
-        Used to skip starting collectors whose page the user disabled in
-        config — those collectors never tick anyway, so skipping them
-        avoids pointless network calls and file polls.
-        """
-        return any(isinstance(p, cls) for p in self._pages)
 
     def _supervise_usb(self) -> None:
         """Background thread: 设备掉线后自动重连。
@@ -574,13 +612,12 @@ class Daemon:
         self._usb_supervisor.start()
         log.info("USB supervisor started (auto-reconnect enabled)")
 
-        # Start collectors
-        self._sys_collector.start()
-        # Skip the network/file polls for pages that config disabled.
-        if self._has_page(GithubPage):
-            self._gh_collector.start()
-        if self._has_page(ClaudePage):
-            self._claude_collector.start()
+        # Start collectors (one per page that needs one; ClockPage /
+        # CommandsPage have None). Per-entry target already picked
+        # Local vs Remote at make_pages() time.
+        for c in self._collectors:
+            if c is not None:
+                c.start()
         for p in self._pages:
             if hasattr(p, "refresh"):
                 p.refresh()
@@ -624,9 +661,9 @@ class Daemon:
         except KeyboardInterrupt:
             pass
         finally:
-            self._sys_collector.stop()
-            self._gh_collector.stop()
-            self._claude_collector.stop()
+            for c in self._collectors:
+                if c is not None:
+                    c.stop()
             if self._sim is not None:
                 self._sim.stop()
             if self._usb is not None:

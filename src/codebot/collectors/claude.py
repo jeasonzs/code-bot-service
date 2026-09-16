@@ -30,9 +30,22 @@ Status enum (6 states):
   permission - PermissionRequest or Notification(permission_prompt)
   stopped    - Stop / SessionEnd
   error      - JSON parse failure on either file
+
+Two implementations share the same :class:`ClaudeCollector` abstract
+interface:
+
+  - :class:`LocalClaudeCollector` — local file poll (the original
+    behaviour, now wrapped in a class).
+  - :class:`codebot.collectors.remote_claude.RemoteClaudeCollector` —
+    paramiko into a remote box and poll the same files there.
+
+Pages only ever talk to the ABC — the daemon picks the implementation
+based on the page entry's ``target`` discriminator.
 """
 
 from __future__ import annotations
+
+from abc import ABC, abstractmethod
 
 import json
 import logging
@@ -103,7 +116,89 @@ def _coerce_float(v) -> Optional[float]:
         return None
 
 
-class ClaudeCollector:
+class ClaudeCollector(ABC):
+    """Page-facing interface for Claude Code state samples."""
+
+    @abstractmethod
+    def snapshot(self) -> ClaudeSnapshot:
+        """Return the latest snapshot. Always returns a snapshot —
+        :func:`_empty_snapshot` is the initial value before any sample.
+        """
+        ...
+
+    @abstractmethod
+    def start(self) -> None: ...
+
+    @abstractmethod
+    def stop(self) -> None: ...
+
+    # Daemon calls this once a minute; default is a no-op so simple
+    # collectors don't have to override.
+    def refresh(self) -> None: pass
+
+
+def _build_snapshot(
+    *,
+    state_dict: Optional[dict],
+    state_mtime: Optional[float],
+    status_dict: Optional[dict],
+    status_mtime: Optional[float],
+    state_err: Optional[str],
+    status_err: Optional[str],
+    stale_after_s: float,
+    now: float,
+) -> ClaudeSnapshot:
+    """Merge the two file payloads (and error info) into a snapshot."""
+
+    snap = _empty_snapshot()
+    snap.ts = now
+
+    # ---- status ----
+    if status_err is not None:
+        snap.status = "error"
+        snap.error = f"status: {status_err}"
+    elif status_dict is not None:
+        st = (status_dict.get("status") or "idle").strip().lower()
+        if st in VALID_STATUSES:
+            snap.status = st
+        else:
+            log.debug("unknown status %r from hook file; idle", st)
+            snap.status = "idle"
+        snap.last_event = status_dict.get("last_event") or ""
+    elif state_dict is not None:
+        # No status file (e.g. hooks not installed). Fall back to
+        # mtime heuristic on state file: fresh = active, stale = stopped.
+        age = now - state_mtime
+        snap.stale = age > stale_after_s
+        snap.status = "stopped" if snap.stale else "active"
+    # else: both files missing -> default "idle"
+
+    # ---- state file fields ----
+    if state_err is not None:
+        # Preserve status info; surface state file error in `error`.
+        if snap.error:
+            snap.error = f"{snap.error}; state: {state_err}"
+        else:
+            snap.error = f"state: {state_err}"
+    if state_dict is not None:
+        snap.model_display = (state_dict.get("model_display") or "")
+        snap.cwd = (state_dict.get("cwd") or "")
+        snap.context_used_pct = _coerce_float(state_dict.get("context_used_pct"))
+        snap.context_in = _coerce_int(state_dict.get("context_in"))
+        snap.context_out = _coerce_int(state_dict.get("context_out"))
+        snap.context_window_size = _coerce_int(state_dict.get("context_window_size"))
+        snap.cost_usd = _coerce_float(state_dict.get("cost_usd"))
+        snap.duration_ms = _coerce_int(state_dict.get("duration_ms"))
+        snap.lines_added = _coerce_int(state_dict.get("lines_added"))
+        snap.lines_removed = _coerce_int(state_dict.get("lines_removed"))
+        snap.session_id = (state_dict.get("session_id") or None)
+
+    snap.state_file_mtime = state_mtime
+    snap.status_file_mtime = status_mtime
+    return snap
+
+
+class LocalClaudeCollector(ClaudeCollector):
     """Background poller for the Claude Code state + status files."""
 
     def __init__(
@@ -153,8 +248,6 @@ class ClaudeCollector:
             self._thread = None
 
     def snapshot(self) -> ClaudeSnapshot:
-        """Return the latest snapshot (always returns a ClaudeSnapshot,
-        never None - idle on first frame before any sample)."""
         with self._lock:
             return ClaudeSnapshot(**self._latest.__dict__)
 
@@ -166,7 +259,7 @@ class ClaudeCollector:
             try:
                 self._sample()
             except Exception as e:  # noqa: BLE001
-                log.warning("ClaudeCollector sample failed: %s", e)
+                log.warning("LocalClaudeCollector sample failed: %s", e)
             self._stop.wait(period)
 
     # ---- sampling ----
@@ -245,64 +338,3 @@ class ClaudeCollector:
     def _publish(self, snap: ClaudeSnapshot) -> None:
         with self._lock:
             self._latest = snap
-
-
-def _build_snapshot(
-    *,
-    state_dict: Optional[dict],
-    state_mtime: Optional[float],
-    status_dict: Optional[dict],
-    status_mtime: Optional[float],
-    state_err: Optional[str],
-    status_err: Optional[str],
-    stale_after_s: float,
-    now: float,
-) -> ClaudeSnapshot:
-    """Merge the two file payloads (and error info) into a snapshot."""
-
-    snap = _empty_snapshot()
-    snap.ts = now
-
-    # ---- status ----
-    if status_err is not None:
-        snap.status = "error"
-        snap.error = f"status: {status_err}"
-    elif status_dict is not None:
-        st = (status_dict.get("status") or "idle").strip().lower()
-        if st in VALID_STATUSES:
-            snap.status = st
-        else:
-            log.debug("unknown status %r from hook file; idle", st)
-            snap.status = "idle"
-        snap.last_event = status_dict.get("last_event") or ""
-    elif state_dict is not None:
-        # No status file (e.g. hooks not installed). Fall back to
-        # mtime heuristic on state file: fresh = active, stale = stopped.
-        age = now - state_mtime
-        snap.stale = age > stale_after_s
-        snap.status = "stopped" if snap.stale else "active"
-    # else: both files missing -> default "idle"
-
-    # ---- state file fields ----
-    if state_err is not None:
-        # Preserve status info; surface state file error in `error`.
-        if snap.error:
-            snap.error = f"{snap.error}; state: {state_err}"
-        else:
-            snap.error = f"state: {state_err}"
-    if state_dict is not None:
-        snap.model_display = (state_dict.get("model_display") or "")
-        snap.cwd = (state_dict.get("cwd") or "")
-        snap.context_used_pct = _coerce_float(state_dict.get("context_used_pct"))
-        snap.context_in = _coerce_int(state_dict.get("context_in"))
-        snap.context_out = _coerce_int(state_dict.get("context_out"))
-        snap.context_window_size = _coerce_int(state_dict.get("context_window_size"))
-        snap.cost_usd = _coerce_float(state_dict.get("cost_usd"))
-        snap.duration_ms = _coerce_int(state_dict.get("duration_ms"))
-        snap.lines_added = _coerce_int(state_dict.get("lines_added"))
-        snap.lines_removed = _coerce_int(state_dict.get("lines_removed"))
-        snap.session_id = (state_dict.get("session_id") or None)
-
-    snap.state_file_mtime = state_mtime
-    snap.status_file_mtime = status_mtime
-    return snap

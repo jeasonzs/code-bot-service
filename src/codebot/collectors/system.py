@@ -1,6 +1,20 @@
-"""System metrics collector using psutil."""
+"""System metrics collector.
+
+Two implementations share the same :class:`SystemCollector` abstract
+interface:
+
+  - :class:`LocalSystemCollector` — psutil on this machine (the original
+    behaviour, now wrapped in a class).
+  - :class:`codebot.collectors.remote_system.RemoteSystemCollector` —
+    paramiko into a remote box and run the same metrics remotely.
+
+Pages only ever talk to the ABC — the daemon picks the implementation
+based on the page entry's ``target`` discriminator.
+"""
 
 from __future__ import annotations
+
+from abc import ABC, abstractmethod
 
 import os
 import psutil
@@ -36,7 +50,24 @@ class SystemSnapshot:
     ts: float
 
 
-class SystemCollector:
+class SystemCollector(ABC):
+    """Page-facing interface for system-metrics samples."""
+
+    @abstractmethod
+    def snapshot(self) -> Optional[SystemSnapshot]: ...
+
+    @abstractmethod
+    def start(self) -> None: ...
+
+    @abstractmethod
+    def stop(self) -> None: ...
+
+    # Daemon calls this once a minute; default is a no-op so simple
+    # collectors don't have to override.
+    def refresh(self) -> None: pass
+
+
+class LocalSystemCollector(SystemCollector):
     """Background thread that samples system metrics at a fixed rate."""
 
     def __init__(self, hz: float = 2.0) -> None:

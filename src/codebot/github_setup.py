@@ -1,33 +1,21 @@
 """Interactive GitHub PAT capture for ``codebotd setup`` (phase 4).
 
-The GitHub page on the device needs a personal access token. Without one
-the page is hidden (``pages.github.enabled: false``) and the collector
-never starts (see ``codebot.collectors.github``). Token resolution at
-runtime is ``$GITHUB_TOKEN`` > ``pages.github.token`` in
-``~/.code_bot/config.yml`` > empty — this phase writes the config file
-half of that.
+Token resolution at runtime is ``$GITHUB_TOKEN`` env > ``token`` from
+the YAML entry — this phase produces the entry half of that.
 
-Behaviour:
+Returns ``(rc, entry | None)``:
+  - ``(0, {"type": "github", "token": "..."})`` on success — caller
+    appends the entry to the pages array.
+  - ``(0, {"type": "github", "token": ""})`` when ``$GITHUB_TOKEN`` is
+    set — page works via env fallback; we write an empty entry just so
+    the daemon knows to build the page at all.
+  - ``(0, None)`` when the user skipped or non-interactive mode — no
+    entry added, no error.
+  - ``(1, None)`` when the config write or the validation step
+    unrecoverably failed.
 
-  • ``$GITHUB_TOKEN`` already set  → report it wins at runtime, skip.
-  • stdin is not a TTY             → print how to set it later, skip
-                                     (keeps ``codebotd setup`` in CI /
-                                     pipes non-blocking).
-  • token already in config.yml    → show masked, default is *keep*.
-  • otherwise                      → prompt (hidden input), validate
-                                     against ``GET /user``, save.
-
-Skipping is always one Enter away and never fails the phase: this
-returns 0 in every path except an unwritable config file (rc=1, the
-"user action required" code) — a missing token degrades one page, it
-shouldn't make ``setup`` look broken.
-
-Every exit path also records ``pages.github.enabled`` so the device only
-shows the GitHub page when a usable token exists.
-
-Under ``sudo`` the config is written to the *invoking* user's home and
-chowned back to them, so the daemon (running unprivileged) can still
-read and rewrite it.
+The function does NOT touch ``Config`` itself. Persistence is the
+caller's job (either ``setup.py`` phase 4 or ``pages_registry``).
 """
 
 from __future__ import annotations
@@ -36,115 +24,79 @@ import json
 import os
 import urllib.error
 import urllib.request
-from pathlib import Path
+from typing import Optional
 
-
-# Anything with this value in config.yml means "never configured" — it's
-# the DEFAULTS placeholder from codebot.config.
-_PLACEHOLDER = "__REPLACE_ME__"
 
 _PAT_URL = "https://github.com/settings/tokens/new?scopes=repo,read:user&description=Code%20Bot"
 
 _MAX_ATTEMPTS = 3
 
 
-def run_github_setup() -> int:
-    """Offer to store a GitHub PAT in ``~/.code_bot/config.yml``.
+def run_github_setup(*, prefilled_token: str = "") -> tuple[int, Optional[dict]]:
+    """Prompt for / reuse a GitHub PAT and return ``(rc, entry)``.
 
-    Whether the user gets prompted is decided by
-    ``codebot._ui.is_interactive()`` — which is False when the wizard is
-    running in ``--yes`` mode or when stdin/stdout aren't TTYs. In that
-    case the only non-skip path is "a token is already in config.yml
-    and we're being asked to keep it", which the function performs
-    silently.
-
-    Every exit path records ``pages.github.enabled`` via ``_finish`` —
-    the device only shows the GitHub page when a usable token exists
-    after this phase (env var, kept token, or freshly saved one).
+    When ``prefilled_token`` is non-empty (Modify flow), the prompt
+    defaults to that token so a quick Enter keeps the existing one;
+    typing replaces it. When empty (Add flow), the prompt is blank.
     """
     from . import _ui
-    from .config import Config, set_page_enabled
-
-    cfg_path = Path.home() / ".code_bot" / "config.yml"
-    cfg = Config(cfg_path)
-
-    def _finish(rc: int, *, enabled: bool) -> int:
-        """Persist ``pages.github.enabled`` and return ``rc``.
-
-        ``enabled`` means "a usable token exists after this phase":
-        env var, kept token, or freshly saved one. rc is not a usable
-        signal here (every skip path returns 0 on purpose).
-        """
-        set_page_enabled(cfg, "github", enabled)
-        _ui.check(
-            "GitHub page",
-            "PASS" if enabled else "INFO",
-            "enabled" if enabled else "hidden until a token is configured",
-        )
-        return rc
 
     env_token = (os.environ.get("GITHUB_TOKEN") or "").strip()
-    if env_token:
+    if env_token and not prefilled_token:
         _ui.check(
             "GitHub token",
             "INFO",
-            "$GITHUB_TOKEN set in environment — overrides config.yml",
+            "$GITHUB_TOKEN set — entry will use env at runtime (token stays empty)",
         )
-        return _finish(0, enabled=True)
-
-    current = (cfg.get("pages", "github", "token") or "").strip()
-    if current == _PLACEHOLDER:
-        current = ""
+        return 0, {"type": "github", "token": ""}
 
     if not _ui.is_interactive():
-        if current:
-            _ui.check("GitHub token", "INFO", f"already configured in {cfg_path}")
-        else:
-            _ui.check("GitHub token", "INFO", "non-interactive mode — skipped")
-            _ui.hint([
-                "To configure it later:",
-                f"  • edit {cfg_path} and set pages.github.token, or",
-                "  • export GITHUB_TOKEN=<pat> before starting the daemon.",
-            ])
-        return _finish(0, enabled=bool(current))
+        _ui.check("GitHub token", "INFO", "non-interactive — skipped")
+        return 0, None
 
-    if current:
-        _ui.check("GitHub token", "INFO", f"already configured: {_mask(current)}")
-        if not _ui.confirm("Replace it?", default=False):
-            _ui.check("GitHub token", "INFO", "kept")
-            return _finish(0, enabled=True)
+    if not prefilled_token and not env_token:
+        _ui.hint([
+            "Code Bot's GitHub page needs a personal access token",
+            "(scopes: repo, read:user — read-only stats, nothing is written).",
+            f"Create one at: {_PAT_URL}",
+            "Press Enter on an empty prompt to skip; you can add it later.",
+        ])
 
-    _ui.hint([
-        "Code Bot's GitHub page needs a personal access token",
-        "(scopes: repo, read:user — read-only stats, nothing is written).",
-        f"Create one at: {_PAT_URL}",
-        "Press Enter on an empty prompt to skip; you can add it later.",
-    ])
-
-    token = _prompt_token()
+    token = _prompt_token(prefilled=prefilled_token)
     if token is None:
         _ui.check("GitHub token", "INFO", "skipped")
         _ui.hint([
             "To configure it later:",
-            f"  • edit {cfg_path} and set pages.github.token, or",
+            "  • add a github entry to ~/.code_bot/config.yml pages:, or",
             "  • export GITHUB_TOKEN=<pat> before starting the daemon.",
         ])
-        # Old token, if any, is still on disk — page stays enabled.
-        return _finish(0, enabled=bool(current))
+        return 0, None
 
-    cfg.set("pages", "github", "token", value=token)
-    cfg.save()
-    if not _verify_written(cfg_path, token):
-        _ui.error(f"failed to write {cfg_path}; token not saved")
-        return _finish(1, enabled=False)
+    return 0, {"type": "github", "token": token}
 
-    _ui.check("GitHub token", "PASS", f"saved to {cfg_path} (mode 600)")
-    return _finish(0, enabled=True)
+
+def modify_github_entry(cfg, entry: dict) -> Optional[dict]:
+    """Modify-flow wrapper: re-run setup with the existing token
+    pre-filled. Returns the new entry, or ``None`` to keep the old one
+    (user cancelled)."""
+    from . import _ui
+
+    if not _ui.confirm(
+        "Re-run GitHub token setup? (Enter keeps the existing token.)",
+        default=False,
+    ):
+        return None
+
+    prefilled = (entry.get("token") or "").strip()
+    rc, new_entry = run_github_setup(prefilled_token=prefilled)
+    if new_entry is None:
+        return None
+    return new_entry
 
 
 # ---- prompting ----
 
-def _prompt_token() -> str | None:
+def _prompt_token(*, prefilled: str = "") -> str | None:
     """Read + validate a PAT. ``None`` means the user chose to skip.
 
     Input is hidden so the token never lands in the terminal scrollback.
@@ -155,9 +107,16 @@ def _prompt_token() -> str | None:
     from . import _ui
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        token = _ui.password("GitHub token (hidden, Enter to skip):", default="")
+        token = _ui.password(
+            "GitHub token (hidden, Enter to skip):", default=prefilled,
+        )
         if not token:
             return None
+        # If the user just hit Enter on a pre-filled token, accept it
+        # without re-validating (we already accepted it once).
+        if prefilled and token == prefilled:
+            _ui.check("GitHub token", "INFO", "kept existing token")
+            return token
 
         with _ui.spinner("Validating against api.github.com/user …"):
             login, err = _validate(token)
@@ -205,32 +164,6 @@ def _validate(token: str) -> tuple[str | None, str]:
         return None, f"Could not reach api.github.com ({e}); can't validate offline."
     except json.JSONDecodeError:
         return None, "GitHub returned a malformed response."
-
-
-def _verify_written(path: Path, token: str) -> bool:
-    """Confirm ``token`` actually landed on disk.
-
-    ``Config.save()`` logs and swallows write errors (it's called from
-    the daemon's start-up path where a read-only home shouldn't be
-    fatal), so the return value tells us nothing — read the file back
-    instead of trusting it.
-    """
-    try:
-        import yaml
-    except ImportError:
-        return False
-    try:
-        with open(path, "r", encoding="utf-8", newline="") as f:
-            data = yaml.safe_load(f)
-    except (OSError, yaml.YAMLError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    section = data.get("pages")
-    if not isinstance(section, dict):
-        return False
-    github = section.get("github")
-    return isinstance(github, dict) and github.get("token") == token
 
 
 # ---- misc ----

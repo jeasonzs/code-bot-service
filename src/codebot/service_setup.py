@@ -1,6 +1,6 @@
 """Per-platform daemon auto-start installer for Code Bot.
 
-Invoked by ``codebotd setup`` (phase 3/5). Three branches:
+Invoked by ``codebotd setup`` (phase 7/7). Three branches:
 
   Linux    — render systemd user unit from ``systemd/codebot.service.in``,
               substitute ``@CODEBOTD_PATH@`` with the resolved ``codebotd``

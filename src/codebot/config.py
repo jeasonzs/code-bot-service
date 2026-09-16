@@ -44,24 +44,20 @@ DEFAULT_CONFIG_PATH: Path = Path.home() / ".code_bot" / "config.yml"
 # this dict on load. Trailing comments are docs; they're stripped on
 # save (PyYAML doesn't preserve them) but the file is still readable.
 DEFAULTS: dict[str, Any] = {
-    # All page-related config (credentials + display toggles + future
-    # settings) lives under ``pages.<page_name>``. Adding a new per-page
-    # field is purely additive — no schema break. Pages not listed here
-    # (Clock / System) have no config and are always shown.
-    "pages": {
-        "github": {
-            "token":   "__REPLACE_ME__",   # GitHub PAT; env GITHUB_TOKEN overrides
-            "enabled": False,              # flipped by `codebotd setup` phase 4
-        },
-        "claude": {
-            "enabled": False,              # flipped by `codebotd setup` phase 3
-        },
-        "custom_commands": {
-            "enabled": False,              # flipped by `codebotd setup` phase 5
-            "items": [],                   # list of {name, icon, command}; daemon chunks by 2/page
-        },
-    },
+    # ``pages`` is an ordered list of entries; each entry has a ``type``
+    # discriminator (``github`` / ``claude`` / ``system`` /
+    # ``custom_commands``) and its own per-type fields. Order = LCD
+    # page order. Empty list means "no pages configured"; the daemon
+    # just shows the always-on Clock page.
+    "pages": [],
 }
+
+
+# Legacy dict keys we still recognize on disk so migration can flatten
+# them into the new array form. Kept here (not in DEFAULTS) because
+# DEFAULTS drives additive migration — we don't want a fresh install to
+# get the legacy keys back.
+_LEGACY_PAGE_KEYS = ("github", "claude", "system", "custom_commands")
 
 
 class Config:
@@ -175,6 +171,14 @@ class Config:
         if _migrate(loaded):
             self._write(loaded)
             log.info("Migrated %s: filled in missing keys from schema", self._path)
+
+        # Legacy dict-shaped ``pages`` (pre-multi-instance schema) is
+        # flattened into the new array form here. Idempotent: a second
+        # pass on already-migrated data is a no-op.
+        if _migrate_pages_array(loaded):
+            self._write(loaded)
+            log.info("Migrated %s: pages dict → array", self._path)
+
         return loaded
 
     def _read_yaml(self) -> Optional[dict]:
@@ -255,23 +259,49 @@ def _migrate(loaded: dict[str, Any], defaults: dict[str, Any] = DEFAULTS) -> boo
     return changed
 
 
-# ---- page toggles ----
+def _migrate_pages_array(loaded: dict[str, Any]) -> bool:
+    """Flatten legacy ``pages: {github: {...}, ...}`` into ``pages: [...]``.
 
-PAGES_SECTION = "pages"
+    New schema: ``pages`` is a list of typed entries. The legacy schema
+    had ``pages`` as a dict of per-type config; the user's `enabled`
+    toggles now translate into entry presence. Idempotent — already-
+    migrated files (pages is a list) are left alone.
 
-
-def page_enabled(cfg: "Config", name: str, default: bool = False) -> bool:
-    """``pages.<name>.enabled`` 的便捷读取。"""
-    return bool(cfg.get(PAGES_SECTION, name, "enabled", default=default))
-
-
-def set_page_enabled(cfg: "Config", name: str, enabled: bool) -> None:
-    """持久化 ``pages.<name>.enabled``。
-
-    Best-effort: ``Config.save()`` 在 I/O 错误时只 log 不抛（daemon 启动
-    路径上不希望 read-only home 致命），调用方如果必须确保落盘应自行读
-    回验证。
+    Returns True if a rewrite is needed.
     """
-    cfg.set(PAGES_SECTION, name, "enabled", value=bool(enabled))
-    cfg.save()
-    log.info("pages.%s.enabled = %s (%s)", name, enabled, cfg.path)
+    pages = loaded.get("pages")
+    if isinstance(pages, list):
+        return False  # already migrated
+    if not isinstance(pages, dict):
+        return False  # missing / corrupt → leave alone; _migrate fills defaults
+
+    new_pages: list[dict] = []
+
+    gh = pages.get("github") or {}
+    token = gh.get("token") if isinstance(gh, dict) else None
+    if token and token != "__REPLACE_ME__":
+        new_pages.append({"type": "github", "token": token})
+
+    claude = pages.get("claude") or {}
+    if isinstance(claude, dict) and claude.get("enabled"):
+        new_pages.append({"type": "claude", "target": "local"})
+
+    # Legacy schema didn't have a user-togglable system page (SystemPage
+    # was always shown). Keep one local entry so behavior is unchanged.
+    new_pages.append({"type": "system", "target": "local"})
+
+    cc = pages.get("custom_commands") or {}
+    items = cc.get("items") if isinstance(cc, dict) else None
+    if items:
+        # Old daemon chunked by 2-per-page; preserve that layout.
+        for i in range(0, len(items), 2):
+            new_pages.append({"type": "custom_commands", "items": items[i:i + 2]})
+
+    loaded["pages"] = new_pages
+    return True
+
+
+# Page-entry section name; the only path the rest of the codebase needs
+# to spell out explicitly. ``pages`` itself is the top-level key; entries
+# inside are plain dicts.
+PAGES_SECTION = "pages"

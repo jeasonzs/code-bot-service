@@ -160,8 +160,14 @@ class GithubPage(BasePage):
     # fills the entire screen, matching SystemPage's layout.
     skip_chrome = True
 
-    def __init__(self, collector: Optional[GithubCollector] = None) -> None:
+    def __init__(self, collector: Optional[GithubCollector] = None, *,
+                 token: str = "", account: Optional[str] = None) -> None:
         self._collector = collector
+        # Stash the per-page token + display account so make_pages() /
+        # future pages can introspect them; the collector also keeps
+        # the token (used in API requests).
+        self._token = token
+        self._account = account
         # Track the last snap we printed so the daemon log doesn't
         # spam once per render frame. None means "haven't printed yet".
         self._last_snap_dump: Optional[tuple] = None
