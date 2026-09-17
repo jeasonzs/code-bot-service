@@ -86,13 +86,11 @@ def run_type_phase(
         if pick == add_label:
             _rc, entry = add_handler()
             if entry is not None:
+                # Always write the type-prefixed auto-name without
+                # prompting — users can edit ``name:`` in the YAML later
+                # if they want a custom label.
                 seq = sum(1 for p in pages if p.get("type") == kind) + 1
-                default_name = entry.get("name") or f"{kind}-{seq:02d}"
-                # _ui.text returns default in non-interactive mode, so
-                # `codebotd setup --yes` still writes name=<auto>.
-                new_name = _ui.text("Display name:", default=default_name)
-                if new_name:
-                    entry["name"] = new_name
+                entry.setdefault("name", f"{kind}-{seq:02d}")
                 pages.append(entry)
             continue
 
@@ -126,15 +124,13 @@ def _edit_entry(
         if action == "Modify":
             result = modify_handler(pages[idx])
             if result is not None:
-                seq = sum(1 for p in pages if p.get("type") == kind)
-                default_name = (
-                    pages[idx].get("name")
-                    or result.get("name")
-                    or f"{kind}-{seq:02d}"
-                )
-                new_name = _ui.text("Display name:", default=default_name)
-                if new_name:
-                    result["name"] = new_name
+                # Keep the entry's existing ``name`` if the user set one
+                # in the YAML; otherwise regenerate the auto-name. Never
+                # prompt — the wizard's only editing surface for pages is
+                # the YAML.
+                if "name" not in result:
+                    seq = sum(1 for p in pages if p.get("type") == kind)
+                    result["name"] = pages[idx].get("name") or f"{kind}-{seq:02d}"
                 pages[idx] = result
                 return pages
             # None = user cancelled; stay on the same entry's menu.

@@ -4,18 +4,18 @@ Invoked by ``codebotd setup``. Seven phases run in sequence:
 
   1. ``doctor``               — environment diagnostics (non-blocking on FAIL)
   2. ``driver_setup``         — USB driver / permissions for the current platform
-  3. Claude pages             — multi-instance: each entry target=local|ssh,
+  3. System pages             — multi-instance: each entry target=local|ssh.
+  4. GitHub pages             — multi-instance: each entry holds its own PAT.
+  5. Claude pages             — multi-instance: each entry target=local|ssh,
                                  local entries install hooks into
                                  ~/.claude/settings.json; SSH entries install
                                  hooks on the remote host.
-  4. GitHub pages             — multi-instance: each entry holds its own PAT.
-  5. Custom commands          — single Configure/Skip step: scans installed
+  6. Custom commands          — single Configure/Skip step: scans installed
                                  apps, multi-select, chunks into per-page
                                  entries; overwrites any existing selection.
-  6. System pages             — multi-instance: each entry target=local|ssh.
   7. ``service_setup``        — daemon auto-start registration + ``enable --now``
 
-Phases 3, 4 and 6 are per-type loops (``pages_registry.run_type_phase``) —
+Phases 3, 4 and 5 are per-type loops (``pages_registry.run_type_phase``) —
 the user can add / edit / delete any number of entries of that type. Each
 type owns its own setup function (``claude_setup.run_claude_setup``,
 ``github_setup.run_github_setup``, etc.) so the type-specific UX is
@@ -103,18 +103,16 @@ def run_setup(*, doctor_only: bool = False) -> int:
             )
             return driver_rc
 
-        # 3. Claude pages — multi-instance. Each call to
-        #    claude_setup.run_claude_setup handles its own hooks
-        #    (local: ~/.claude/settings.json; SSH: remote host's file).
-        _ui.section("Phase 3/7 — Claude pages")
-        claude_rc = pages_registry.run_type_phase(
-            cfg, kind="claude",
-            add_handler=claude_setup.run_claude_setup,
-            modify_handler=claude_setup.modify_claude_entry,
-            format_entry=pages_registry.format_claude_entry,
-            add_label="Add a Claude page…",
+        # 3. System pages — multi-instance. target=local or target=ssh.
+        _ui.section("Phase 3/7 — System pages")
+        sys_rc = pages_registry.run_type_phase(
+            cfg, kind="system",
+            add_handler=system_setup.run_system_setup,
+            modify_handler=system_setup.modify_system_entry,
+            format_entry=pages_registry.format_system_entry,
+            add_label="Add a system page…",
         )
-        rc = max(rc, claude_rc)
+        rc = max(rc, sys_rc)
 
         # 4. GitHub pages — multi-instance. Each entry holds its own PAT.
         _ui.section("Phase 4/7 — GitHub pages")
@@ -127,23 +125,25 @@ def run_setup(*, doctor_only: bool = False) -> int:
         )
         rc = max(rc, gh_rc)
 
-        # 5. Custom commands — single Configure/Skip step. Overwrites any
+        # 5. Claude pages — multi-instance. Each call to
+        #    claude_setup.run_claude_setup handles its own hooks
+        #    (local: ~/.claude/settings.json; SSH: remote host's file).
+        _ui.section("Phase 5/7 — Claude pages")
+        claude_rc = pages_registry.run_type_phase(
+            cfg, kind="claude",
+            add_handler=claude_setup.run_claude_setup,
+            modify_handler=claude_setup.modify_claude_entry,
+            format_entry=pages_registry.format_claude_entry,
+            add_label="Add a Claude page…",
+        )
+        rc = max(rc, claude_rc)
+
+        # 6. Custom commands — single Configure/Skip step. Overwrites any
         #    existing selection (no per-entry edit; the wizard is the
         #    only way to edit custom_commands in this build).
-        _ui.section("Phase 5/7 — Custom commands")
+        _ui.section("Phase 6/7 — Custom commands")
         cmd_rc = commands_setup.run_commands_setup(cfg)
         rc = max(rc, cmd_rc)
-
-        # 6. System pages — multi-instance. target=local or target=ssh.
-        _ui.section("Phase 6/7 — System pages")
-        sys_rc = pages_registry.run_type_phase(
-            cfg, kind="system",
-            add_handler=system_setup.run_system_setup,
-            modify_handler=system_setup.modify_system_entry,
-            format_entry=pages_registry.format_system_entry,
-            add_label="Add a system page…",
-        )
-        rc = max(rc, sys_rc)
 
         # 7. service — last so the daemon starts after every config file
         #    is in place.
@@ -154,6 +154,9 @@ def run_setup(*, doctor_only: bool = False) -> int:
         if rc == 0:
             _ui.section("Setup done")
             _ui.hint([
+                f"Config file: {cfg.path}",
+                "  (edit name: / account: / ssh_config: here — the wizard's only editing surface)",
+                "",
                 "Verify with:",
                 "  codebotd doctor",
                 "  systemctl --user status codebot.service   (Linux)",
@@ -165,6 +168,7 @@ def run_setup(*, doctor_only: bool = False) -> int:
                 f"setup finished with rc={rc}; one or more phases were skipped or failed. "
                 "Re-run `codebotd setup` to retry."
             )
+            _ui.hint([f"Config file (partial / failed state): {cfg.path}"])
         return rc
 
     except _ui.WizardCancelled:

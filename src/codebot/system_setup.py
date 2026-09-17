@@ -98,11 +98,12 @@ def _prompt_ssh(
     # Password: only ask if there's no existing one to keep.
     password = default_password
     if password is None:
-        if _ui.confirm("Use password auth?", default=False):
-            entered = _ui.password(
-                "SSH password (hidden, Enter to skip):", default="",
-            )
-            password = entered or None
+        # No separate "use password?" confirm — just prompt. Empty
+        # Enter = no password (let ssh fall through to keys / agent).
+        entered = _ui.password(
+            "SSH password (hidden, Enter to skip):", default="",
+        )
+        password = entered or None
 
     target = SshTarget(username=username, host=host, password=password)
 
