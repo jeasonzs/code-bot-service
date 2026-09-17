@@ -32,6 +32,37 @@ ModifyHandler = Callable[[Config, dict], Optional[dict]]
 FormatEntry = Callable[[dict], str]
 
 
+def auto_name(entry: dict, kind: str) -> str:
+    """Default display name written to ``entry["name"]`` by setup.
+
+    Per-kind format:
+
+    - ``system``           — ``"System"`` (subtitle carries the host)
+    - ``github``           — ``"{account}@GitHub"`` (or ``"GitHub"`` if unset)
+    - ``claude``           — ``"Claude@localhost"`` / ``"Claude@{host}"``
+    - anything else        — ``kind`` itself, capitalised (``"Custom_commands"``)
+
+    The explicit ``entry["name"]`` already wins in callers — this is only
+    the fallback written when no name exists yet.
+    """
+    if kind == "system":
+        return "System"
+    if kind == "github":
+        account = (entry.get("account") or "").strip()
+        return f"{account}@GitHub" if account else "GitHub"
+    if kind == "claude":
+        if entry.get("target") == "ssh":
+            spec = entry.get("ssh_config") or {}
+            host = spec.get("host") or "ssh"
+            port = spec.get("port")
+            # Non-default ports disambiguate two hosts with the same name
+            # on different ports; default 22 is omitted.
+            suffix = f":{port}" if isinstance(port, int) and port != 22 else ""
+            return f"Claude@{host}{suffix}"
+        return "Claude@localhost"
+    return kind.capitalize() if kind else "Page"
+
+
 def run_type_phase(
     cfg: Config,
     *,
@@ -86,17 +117,15 @@ def run_type_phase(
         if pick == add_label:
             _rc, entry = add_handler()
             if entry is not None:
-                # Always write the type-prefixed auto-name without
-                # prompting — users can edit ``name:`` in the YAML later
-                # if they want a custom label.
-                seq = sum(1 for p in pages if p.get("type") == kind) + 1
-                entry.setdefault("name", f"{kind}-{seq:02d}")
+                # Write the per-kind auto-name without prompting — users
+                # can edit ``name:`` in the YAML later for a custom label.
+                entry.setdefault("name", auto_name(entry, kind))
                 pages.append(entry)
             continue
 
         # Picked an existing entry. Map display index → original pages index.
         orig_idx = my_pages[choices.index(pick)][0]
-        pages = _edit_entry(pages, orig_idx, modify_handler, format_entry)
+        pages = _edit_entry(pages, orig_idx, modify_handler, format_entry, kind, cfg)
 
 
 def _edit_entry(
@@ -104,6 +133,8 @@ def _edit_entry(
     idx: int,
     modify_handler: ModifyHandler,
     format_entry: FormatEntry,
+    kind: str,
+    cfg: Config,
 ) -> list:
     """Action menu for one existing entry: Modify / Delete / Back."""
     from . import _ui
@@ -122,15 +153,13 @@ def _edit_entry(
                 pages.pop(idx)
             return pages
         if action == "Modify":
-            result = modify_handler(pages[idx])
+            result = modify_handler(cfg, pages[idx])
             if result is not None:
                 # Keep the entry's existing ``name`` if the user set one
-                # in the YAML; otherwise regenerate the auto-name. Never
-                # prompt — the wizard's only editing surface for pages is
-                # the YAML.
+                # in the YAML; otherwise regenerate the auto-name from
+                # the modified entry's fields.
                 if "name" not in result:
-                    seq = sum(1 for p in pages if p.get("type") == kind)
-                    result["name"] = pages[idx].get("name") or f"{kind}-{seq:02d}"
+                    result["name"] = pages[idx].get("name") or auto_name(result, kind)
                 pages[idx] = result
                 return pages
             # None = user cancelled; stay on the same entry's menu.

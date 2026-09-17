@@ -187,7 +187,7 @@ def open_ssh(target: SshTarget, *, timeout: float = 5.0) -> paramiko.SSHClient:
                 log.debug("could not load default RSA key %s: %s", default_key, e)
                 pkey = None
 
-    client.connect(
+    connect_kwargs = dict(
         hostname=target.host,
         username=target.username,
         password=target.password,
@@ -197,6 +197,14 @@ def open_ssh(target: SshTarget, *, timeout: float = 5.0) -> paramiko.SSHClient:
         allow_agent=target.password is None,
         look_for_keys=target.password is None,
     )
+    # Only forward port when explicitly set. paramiko defaults to 22 when
+    # the kwarg is absent, but forwarding ``port=None`` makes
+    # ``socket.getaddrinfo`` resolve it as port 0 (the "any" port) and
+    # the connection lands on whatever happens to be listening on the host.
+    if target.port is not None:
+        connect_kwargs["port"] = target.port
+
+    client.connect(**connect_kwargs)
     return client
 
 

@@ -67,6 +67,7 @@ def modify_system_entry(cfg, entry: dict) -> Optional[dict]:
         default_username=target.username,
         default_host=target.host,
         default_password=target.password,
+        default_port=target.port,
     )
     if ssh_config is None:
         return None
@@ -78,6 +79,7 @@ def _prompt_ssh(
     default_username: str = "",
     default_host: str = "",
     default_password: Optional[str] = None,
+    default_port: Optional[int] = None,
 ) -> Optional[dict]:
     """Prompt for username / host / optional password and test the
     connection. Returns the ``ssh_config`` dict, or ``None`` if the
@@ -94,6 +96,7 @@ def _prompt_ssh(
     if not host:
         _ui.warn("host required")
         return None
+    port = _prompt_port(default_port)
 
     # Password: only ask if there's no existing one to keep.
     password = default_password
@@ -105,10 +108,13 @@ def _prompt_ssh(
         )
         password = entered or None
 
-    target = SshTarget(username=username, host=host, password=password)
+    target = SshTarget(
+        username=username, host=host, password=password, port=port,
+    )
 
-    if _ui.confirm(f"Test connection to {username}@{host}?", default=True):
-        with _ui.spinner(f"Connecting to {username}@{host} …"):
+    addr = f"{username}@{host}" + (f":{port}" if port else "")
+    if _ui.confirm(f"Test connection to {addr}?", default=True):
+        with _ui.spinner(f"Connecting to {addr} …"):
             client = None
             try:
                 client = open_ssh(target, timeout=5.0)
@@ -124,6 +130,29 @@ def _prompt_ssh(
                         pass
 
     ssh_config: dict = {"username": username, "host": host}
+    if port is not None:
+        ssh_config["port"] = port
     if password is not None:
         ssh_config["password"] = password
     return ssh_config
+
+
+def _prompt_port(default: Optional[int]) -> Optional[int]:
+    """Prompt for SSH port; empty / "22" → None (paramiko default).
+
+    Re-prompts on invalid input rather than failing the whole wizard.
+    """
+    from . import _ui
+    hint = "22" if default is None else str(default)
+    while True:
+        raw = _ui.text("SSH port:", default=hint).strip()
+        if not raw:
+            return None
+        try:
+            port = int(raw)
+        except ValueError:
+            _ui.warn("port must be a number")
+            continue
+        if 1 <= port <= 65535:
+            return None if port == 22 else port
+        _ui.warn("port must be 1..65535")

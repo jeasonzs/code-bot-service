@@ -39,6 +39,7 @@ from .collectors.github import GithubCollector
 from .collectors.claude import LocalClaudeCollector
 from .collectors.remote_claude import RemoteClaudeCollector
 from .config import Config
+from .pages_registry import auto_name as _auto_name
 from .ssh import LocalTarget, SshTarget, parse_target
 
 
@@ -59,43 +60,27 @@ class _BuildPageError(Exception):
     skips the entry — the daemon keeps running with the rest."""
 
 
-def _entry_display_name(entry: dict, *, seq_for_kind: int) -> str:
-    """Resolve the per-entry display name shown in the top Header.
-
-    Priority: explicit ``entry["name"]`` (set during setup) > auto-derived
-    ``{type}-{seq:02d}`` > fallback ``kind or "Page"``. ``seq_for_kind`` is
-    1-based and counted per entry type, so two system pages yield
-    ``system-01`` / ``system-02`` regardless of github entries in between.
-    """
-    explicit = entry.get("name")
-    if explicit:
-        return str(explicit)
-    kind = entry.get("type")
-    if kind:
-        return f"{kind}-{seq_for_kind:02d}"
-    return "Page"
-
-
 def _system_host_label(entry: dict, target) -> str:
     """Render the host label shown in the SystemPage header subtitle."""
     if isinstance(target, LocalTarget):
         return "localhost"
-    return (entry.get("ssh_config") or {}).get("host") or "ssh"
+    spec = entry.get("ssh_config") or {}
+    host = spec.get("host") or "ssh"
+    port = spec.get("port")
+    suffix = f":{port}" if isinstance(port, int) and port != 22 else ""
+    return f"{host}{suffix}"
 
 
-def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
+def _build_page_and_collector(entry: dict) -> tuple:
     """Build (page, collector) for one config entry.
 
     The collector is constructed here too — pages only know their
     abstract collector interface; the entry's ``target`` discriminator
     picks the Local vs Remote implementation. ``None`` collector means
     the page doesn't need one (ClockPage, CommandsPage).
-
-    ``default_name`` is the type-prefixed auto-name (``system-01`` etc.);
-    ``entry["name"]`` overrides it when present (see ``_entry_display_name``).
     """
     kind = entry.get("type")
-    display_name = entry.get("name") or default_name
+    display_name = entry.get("name") or _auto_name(entry, kind)
     if kind == "github":
         token = (entry.get("token") or "").strip()
         # Empty token is OK when $GITHUB_TOKEN is set — the setup
@@ -109,6 +94,7 @@ def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
         page = GithubPage(collector=gh, token=token,
                           account=entry.get("account"),
                           title=display_name)
+        page.title = display_name
         return page, gh
     if kind == "system":
         target = parse_target(entry)
@@ -121,6 +107,7 @@ def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
             title=display_name,
             host_label=_system_host_label(entry, target),
         )
+        page.title = display_name
         return page, col
     if kind == "claude":
         target = parse_target(entry)
@@ -145,6 +132,7 @@ def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
                 stale_after_s=30.0,
             )
         page = ClaudePage(collector=col, title=display_name)
+        page.title = display_name
         return page, col
     if kind == "custom_commands":
         items = [
@@ -159,7 +147,11 @@ def _build_page_and_collector(entry: dict, *, default_name: str) -> tuple:
         if not items:
             raise _BuildPageError("custom_commands entry has empty items")
         page = CommandsPage(items)
-        page.title = display_name
+        # Prefer explicit entry-level name; fall back to the first item's
+        # label (the screen-visible "main" entry); "Commands" is the
+        # last-resort identity used by log lines.
+        first = items[0].name if items else ""
+        page.title = entry.get("name") or first or "Commands"
         return page, None
     raise _BuildPageError(f"unknown page type {kind!r}")
 
@@ -174,29 +166,23 @@ def make_pages(config: Optional[Config] = None) -> tuple[list, list]:
     the daemon free of per-page conditionals (indicator segment count,
     next/prev wrap, refresh loop all derive from ``len(self._pages)``).
 
-    Each entry's display name is resolved per-kind with a 1-based
-    sequence counter (see ``_entry_display_name``). The counter is
-    independent of YAML order across types — adding a github entry
-    between two system entries does NOT renumber the system pages.
+    Each entry's display name is resolved by ``_build_page_and_collector``:
+    explicit ``entry["name"]`` wins, otherwise the per-kind auto-name
+    from :func:`pages_registry.auto_name` is used.
     """
     if config is None:
         config = Config()
 
     pages: list = [ClockPage()]
     collectors: list = [None]
-    seq_per_kind: dict[str, int] = {}
     for entry in (config.get("pages") or []):
         if not isinstance(entry, dict):
             continue
         kind = entry.get("type")
         if not kind:
             continue
-        seq_per_kind[kind] = seq_per_kind.get(kind, 0) + 1
-        default_name = f"{kind}-{seq_per_kind[kind]:02d}"
         try:
-            page, col = _build_page_and_collector(
-                entry, default_name=default_name,
-            )
+            page, col = _build_page_and_collector(entry)
         except _BuildPageError as e:
             log.warning("skipping page entry %r: %s", entry, e)
             continue

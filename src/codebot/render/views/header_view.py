@@ -73,7 +73,7 @@ class HeaderView:
     subtitle_color: Color = VSCodeDark.FG_DIM
 
     def draw(self, canvas: Canvas) -> None:
-        row_cy = HEADER_H // 2
+        row_cy = HEADER_H // 2 - 5
 
         # 1) `>_` terminal icon at the left margin.
         draw_icon(
